@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>KMF Smart Classroom UI Prototype</title>
+  <style>
+    :root {
+      --bg: #f3efe4;
+      --paper: #fffaf0;
+      --ink: #162521;
+      --muted: #5a6b66;
+      --line: rgba(22, 37, 33, 0.12);
+      --accent: #d95d39;
+      --accent-2: #275d63;
+      --gold: #c6a969;
+      --danger: #9f2d2d;
+      --ok: #227c5d;
+      --warm: #f1d7b8;
+      --cool: #dcebed;
+      --shadow: 0 18px 50px rgba(22, 37, 33, 0.12);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: Georgia, "Times New Roman", serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(217, 93, 57, 0.18), transparent 32%),
+        radial-gradient(circle at right 20%, rgba(39, 93, 99, 0.16), transparent 30%),
+        linear-gradient(180deg, #f8f4ea 0%, #efe5d3 100%);
+    }
+
+    .shell {
+      width: min(1200px, calc(100% - 32px));
+      margin: 24px auto 40px;
+      background: rgba(255, 250, 240, 0.86);
+      border: 1px solid rgba(22, 37, 33, 0.08);
+      border-radius: 28px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      backdrop-filter: blur(12px);
+    }
+
+    .hero {
+      padding: 28px 28px 20px;
+      border-bottom: 1px solid var(--line);
+      background:
+        linear-gradient(135deg, rgba(255,255,255,0.55), rgba(255,255,255,0.15)),
+        linear-gradient(120deg, rgba(198,169,105,0.28), rgba(39,93,99,0.10));
+    }
+
+    .eyebrow {
+      font-size: 12px;
+      letter-spacing: 0.24em;
+      text-transform: uppercase;
+      color: var(--accent-2);
+      margin-bottom: 10px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(2rem, 4vw, 3.8rem);
+      line-height: 0.95;
+      max-width: 10ch;
+    }
+
+    .sub {
+      margin: 16px 0 0;
+      max-width: 760px;
+      color: var(--muted);
+      font-size: 1.05rem;
+      line-height: 1.6;
+    }
+
+    .role-tabs {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-top: 22px;
+    }
+
+    .role-btn {
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.65);
+      color: var(--ink);
+      padding: 12px 18px;
+      border-radius: 999px;
+      cursor: pointer;
+      font-size: 0.95rem;
+      transition: transform 180ms ease, background 180ms ease, border-color 180ms ease;
+    }
+
+    .role-btn.active {
+      background: var(--ink);
+      color: #fff;
+      border-color: var(--ink);
+      transform: translateY(-1px);
+    }
+
+    .content {
+      padding: 24px 28px 32px;
+      display: grid;
+      gap: 20px;
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      background: rgba(255,255,255,0.74);
+      padding: 20px;
+      box-shadow: 0 10px 25px rgba(22, 37, 33, 0.04);
+    }
+
+    .panel h2, .panel h3, .panel h4 {
+      margin-top: 0;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1.2fr 0.8fr;
+      gap: 20px;
+    }
+
+    .student-screen,
+    .academic-screen {
+      display: none;
+      animation: fadeUp 320ms ease;
+    }
+
+    .student-screen.active,
+    .academic-screen.active {
+      display: block;
+    }
+
+    .filters {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+
+    .chip {
+      padding: 10px 14px;
+      border-radius: 999px;
+      background: var(--paper);
+      border: 1px solid var(--line);
+      font-size: 0.9rem;
+    }
+
+    .heatmap {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .room-card {
+      border-radius: 20px;
+      padding: 16px;
+      min-height: 150px;
+      color: #fff;
+      position: relative;
+      overflow: hidden;
+      background: linear-gradient(135deg, #275d63, #1f3a40);
+    }
+
+    .room-card.medium {
+      background: linear-gradient(135deg, #c07b2c, #9a5721);
+    }
+
+    .room-card.high {
+      background: linear-gradient(135deg, #a53a2c, #6f1f27);
+    }
+
+    .room-card::after {
+      content: "";
+      position: absolute;
+      inset: auto -30px -30px auto;
+      width: 100px;
+      height: 100px;
+      background: rgba(255,255,255,0.12);
+      border-radius: 50%;
+    }
+
+    .room-meta {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 26px;
+      position: relative;
+      z-index: 1;
+    }
+
+    .room-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      position: relative;
+      z-index: 1;
+    }
+
+    .room-tags span {
+      padding: 6px 10px;
+      border: 1px solid rgba(255,255,255,0.24);
+      border-radius: 999px;
+      font-size: 0.78rem;
+    }
+
+    .legend, .stats, .timeline, .alerts {
+      display: grid;
+      gap: 12px;
+    }
+
+    .stat-row, .timeline-item, .alert-item, .optimizer-item {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      padding: 12px 14px;
+      border-radius: 16px;
+      background: rgba(255,255,255,0.7);
+      border: 1px solid var(--line);
+    }
+
+    .swatch {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      display: inline-block;
+      margin-right: 8px;
+    }
+
+    .swatch.low { background: #275d63; }
+    .swatch.medium { background: #c07b2c; }
+    .swatch.high { background: #a53a2c; }
+
+    .badge {
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 0.8rem;
+      white-space: nowrap;
+    }
+
+    .badge.ok {
+      background: rgba(34, 124, 93, 0.12);
+      color: var(--ok);
+    }
+
+    .badge.warn {
+      background: rgba(198, 169, 105, 0.18);
+      color: #7b5a16;
+    }
+
+    .badge.danger {
+      background: rgba(159, 45, 45, 0.12);
+      color: var(--danger);
+    }
+
+    .optimizer-list {
+      display: grid;
+      gap: 12px;
+    }
+
+    .split {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 20px;
+    }
+
+    .muted {
+      color: var(--muted);
+    }
+
+    .small {
+      font-size: 0.9rem;
+    }
+
+    @keyframes fadeUp {
+      from {
+        opacity: 0;
+        transform: translateY(8px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    @media (max-width: 900px) {
+      .grid,
+      .split {
+        grid-template-columns: 1fr;
+      }
+
+      .heatmap {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="hero">
+      <div class="eyebrow">KMF Faculty Intelligence Layer</div>
+      <h1>Smart Classroom & Event Management</h1>
+      <p class="sub">
+        A role-based concept interface for the YTU MTM4692 project. The Student side focuses on fast room discovery with live occupancy signals, while the Academic side emphasizes planning quality, conflict prevention, and exam coordination.
+      </p>
+      <div class="role-tabs" aria-label="Role switcher">
+        <button class="role-btn active" data-role="student">Student Login</button>
+        <button class="role-btn" data-role="academic">Academic Login</button>
+      </div>
+    </section>
+
+    <section class="content">
+      <div class="student-screen active" id="student">
+        <div class="grid">
+          <article class="panel">
+            <h2>Live Map / Heatmap</h2>
+            <p class="muted">Students only see availability, room capacity, and smart equipment. Academic identities and planning details stay hidden.</p>
+            <div class="filters">
+              <div class="chip">Projector</div>
+              <div class="chip">Power Outlet 20+</div>
+              <div class="chip">Smart Board</div>
+              <div class="chip">Floor 1-3</div>
+            </div>
+            <div class="heatmap">
+              <div class="room-card high">
+                <div class="room-meta">
+                  <strong>A-101</strong>
+                  <span>%70 occupied</span>
+                </div>
+                <div class="room-tags">
+                  <span>Projector</span>
+                  <span>24 outlets</span>
+                  <span>Smart board</span>
+                </div>
+              </div>
+              <div class="room-card medium">
+                <div class="room-meta">
+                  <strong>B-202</strong>
+                  <span>%40 occupied</span>
+                </div>
+                <div class="room-tags">
+                  <span>Smart board</span>
+                  <span>18 outlets</span>
+                  <span>Quiet zone</span>
+                </div>
+              </div>
+              <div class="room-card">
+                <div class="room-meta">
+                  <strong>D-010</strong>
+                  <span>available</span>
+                </div>
+                <div class="room-tags">
+                  <span>12 outlets</span>
+                  <span>Ground floor</span>
+                </div>
+              </div>
+            </div>
+          </article>
+
+          <aside class="panel">
+            <h3>Smart Filter Insight</h3>
+            <div class="stats">
+              <div class="stat-row">
+                <span>Rooms with projector</span>
+                <span class="badge ok">4 match</span>
+              </div>
+              <div class="stat-row">
+                <span>Rooms with 20+ outlets</span>
+                <span class="badge ok">3 match</span>
+              </div>
+              <div class="stat-row">
+                <span>Best quiet study option</span>
+                <span class="badge warn">D-010</span>
+              </div>
+            </div>
+
+            <div class="legend" style="margin-top:16px;">
+              <div><span class="swatch low"></span>Low occupancy</div>
+              <div><span class="swatch medium"></span>Medium occupancy</div>
+              <div><span class="swatch high"></span>High occupancy</div>
+            </div>
+          </aside>
+        </div>
+      </div>
+
+      <div class="academic-screen" id="academic">
+        <div class="split">
+          <article class="panel">
+            <h2>Schedule Optimizer</h2>
+            <p class="muted">Exam and lecture placement is guided by room capacity, prior occupancy trends, and existing faculty schedule pressure.</p>
+            <div class="optimizer-list">
+              <div class="optimizer-item">
+                <div>
+                  <strong>C-301</strong>
+                  <div class="small muted">Capacity 80, prior occupancy rate %32.5</div>
+                </div>
+                <span class="badge ok">Best fit</span>
+              </div>
+              <div class="optimizer-item">
+                <div>
+                  <strong>B-201</strong>
+                  <div class="small muted">Capacity 60, strong AV support, moderate occupancy</div>
+                </div>
+                <span class="badge warn">Alternative</span>
+              </div>
+              <div class="optimizer-item">
+                <div>
+                  <strong>A-102</strong>
+                  <div class="small muted">Capacity 30, better for quizzes and makeup sessions</div>
+                </div>
+                <span class="badge warn">Compact</span>
+              </div>
+            </div>
+          </article>
+
+          <article class="panel">
+            <h2>Conflict Detection</h2>
+            <div class="alerts">
+              <div class="alert-item">
+                <div>
+                  <strong>Room clash prevented</strong>
+                  <div class="small muted">New event request overlaps with Food Microbiology on Thursday 14:00-15:50.</div>
+                </div>
+                <span class="badge danger">Blocked</span>
+              </div>
+              <div class="alert-item">
+                <div>
+                  <strong>Exam planning safe</strong>
+                  <div class="small muted">Materials Science Midterm in C-301 has no approved overlap.</div>
+                </div>
+                <span class="badge ok">Clear</span>
+              </div>
+            </div>
+          </article>
+        </div>
+
+        <div class="grid">
+          <article class="panel">
+            <h3>Coordination Timeline</h3>
+            <div class="timeline">
+              <div class="timeline-item">
+                <div>
+                  <strong>22 Apr 13:00</strong>
+                  <div class="small muted">Materials Science Midterm</div>
+                </div>
+                <span class="badge ok">C-301</span>
+              </div>
+              <div class="timeline-item">
+                <div>
+                  <strong>23 Apr 16:15</strong>
+                  <div class="small muted">Food Innovation Society Meetup</div>
+                </div>
+                <span class="badge warn">Pending</span>
+              </div>
+              <div class="timeline-item">
+                <div>
+                  <strong>24 Apr 09:30</strong>
+                  <div class="small muted">BioProcess Systems Quiz</div>
+                </div>
+                <span class="badge ok">A-102</span>
+              </div>
+            </div>
+          </article>
+
+          <aside class="panel">
+            <h3>Decision Support</h3>
+            <p class="muted">This screen is backed conceptually by the `v_exam_coordination` view and overlap triggers in the database.</p>
+            <div class="stats">
+              <div class="stat-row">
+                <span>Rooms under high weekly pressure</span>
+                <span class="badge warn">2 rooms</span>
+              </div>
+              <div class="stat-row">
+                <span>Pending requests awaiting review</span>
+                <span class="badge warn">2 items</span>
+              </div>
+              <div class="stat-row">
+                <span>Security rule</span>
+                <span class="badge ok">Academic-only approvals</span>
+              </div>
+            </div>
+          </aside>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const buttons = document.querySelectorAll(".role-btn");
+    const studentScreen = document.getElementById("student");
+    const academicScreen = document.getElementById("academic");
+
+    buttons.forEach((button) => {
+      button.addEventListener("click", () => {
+        buttons.forEach((btn) => btn.classList.remove("active"));
+        button.classList.add("active");
+
+        const role = button.dataset.role;
+        const studentActive = role === "student";
+
+        studentScreen.classList.toggle("active", studentActive);
+        academicScreen.classList.toggle("active", !studentActive);
+      });
+    });
+  </script>
+</body>
+</html>
