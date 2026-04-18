@@ -53,6 +53,26 @@ def h(value: object) -> str:
     return html.escape("" if value is None else str(value))
 
 
+def logo_svg() -> str:
+    return """
+    <svg viewBox="0 0 80 80" aria-hidden="true" role="img">
+      <defs>
+        <linearGradient id="kmfGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stop-color="#f1b25a" />
+          <stop offset="100%" stop-color="#d4683f" />
+        </linearGradient>
+      </defs>
+      <rect x="4" y="4" width="72" height="72" rx="22" fill="#17363a" />
+      <path d="M40 12l5.6 13.8 14.9 1.1-11.4 9.5 3.7 14.2L40 42.4 27.2 50.6l3.7-14.2-11.4-9.5 14.9-1.1z" fill="url(#kmfGrad)" />
+      <rect x="24" y="45" width="32" height="16" rx="4" fill="#fff6ea" />
+      <rect x="29" y="50" width="7" height="11" rx="1.5" fill="#17363a" />
+      <rect x="38" y="50" width="7" height="11" rx="1.5" fill="#17363a" />
+      <rect x="47" y="50" width="4" height="11" rx="1.5" fill="#17363a" />
+      <path d="M23 63h34" stroke="#fff6ea" stroke-width="3" stroke-linecap="round" />
+    </svg>
+    """
+
+
 def sql_bool(value: str | None) -> int | None:
     if value == "1":
         return 1
@@ -103,6 +123,22 @@ def style_block() -> str:
         border-radius: 24px;
         box-shadow: var(--shadow);
         backdrop-filter: blur(10px);
+      }
+      .brand-link {
+        display: inline-flex;
+        align-items: center;
+        gap: 14px;
+      }
+      .brand-mark {
+        width: 60px;
+        height: 60px;
+        flex: 0 0 auto;
+        filter: drop-shadow(0 12px 24px rgba(21, 35, 33, 0.18));
+      }
+      .brand-copy {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
       }
       .brand h1 {
         margin: 4px 0 0;
@@ -262,6 +298,15 @@ def style_block() -> str:
       .button-accent {
         background: linear-gradient(140deg, var(--accent), var(--accent-strong));
       }
+      .button-link {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 12px 14px;
+        border-radius: 14px;
+        border: 1px solid var(--line);
+        background: rgba(255,255,255,0.82);
+      }
       .inline-form {
         display: inline-block;
         width: auto;
@@ -283,6 +328,12 @@ def style_block() -> str:
       }
       .small { font-size: 0.9rem; }
       .spaced { margin-top: 18px; }
+      .welcome-line {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        align-items: center;
+      }
       .table-lite {
         width: 100%;
         border-collapse: collapse;
@@ -316,6 +367,7 @@ def style_block() -> str:
 
 
 def render_layout(title: str, content: str, user: sqlite3.Row | None = None) -> str:
+    home_link = "/dashboard" if user is not None else "/"
     user_html = ""
     if user is not None:
         user_html = f"""
@@ -324,6 +376,7 @@ def render_layout(title: str, content: str, user: sqlite3.Row | None = None) -> 
             <div class="small muted">Signed in as</div>
             <strong>{h(user["name"])}</strong>
             <div class="small muted">{h(user["role"])} • {h(user["email"])}</div>
+            <div class="small muted">Click the logo anytime to return to your home screen.</div>
           </div>
           <form method="post" action="/logout" class="inline-form">
             <button class="button-secondary" type="submit">Sign out</button>
@@ -342,10 +395,14 @@ def render_layout(title: str, content: str, user: sqlite3.Row | None = None) -> 
   <body>
     <main class="app-shell">
       <section class="topbar">
-        <div class="brand">
-          <div class="eyebrow">YTU Mathematical Engineering • Applied SQL</div>
-          <h1>KMF Smart Classroom & Event Management System</h1>
-        </div>
+        <a class="brand-link" href="{home_link}" title="Return to home">
+          <div class="brand-mark">{logo_svg()}</div>
+          <div class="brand-copy brand">
+            <div class="eyebrow">YTU Mathematical Engineering • Applied SQL</div>
+            <h1>KMF Smart Classroom & Event Management System</h1>
+            <div class="small muted">Yildiz-inspired classroom intelligence dashboard</div>
+          </div>
+        </a>
         {user_html or '<div class="muted small">SQLite-backed demo application</div>'}
       </section>
       {content}
@@ -529,6 +586,10 @@ def student_dashboard(user: sqlite3.Row, params: dict[str, list[str]], message: 
             "SELECT room_id, room_code FROM Classrooms WHERE is_active = 1 ORDER BY room_code"
         ).fetchall()
 
+    pending_count = sum(1 for row in requests if row["status"] == "Pending")
+    approved_count = sum(1 for row in requests if row["status"] == "Approved")
+    available_now = sum(1 for row in rooms if row["live_status"] in ("Available", "Reserved"))
+
     flash = ""
     if message:
         flash_class = "error" if error else "success"
@@ -590,7 +651,13 @@ def student_dashboard(user: sqlite3.Row, params: dict[str, list[str]], message: 
       <div class="hero-grid">
         <div>
           <div class="eyebrow">Student Dashboard</div>
-          <h2>Find the right room in a few seconds</h2>
+          <div class="welcome-line">
+            <h2>Welcome back, {h(user["name"].split()[0])}</h2>
+            <span class="badge info">{h(user["department_name"])}</span>
+          </div>
+          <p class="muted">
+            Find the right room in a few seconds. The interface stays tightly connected to SQLite, so filters, live room cards, and reservation history all reflect current database values.
+          </p>
           <p class="muted">
             The live map is powered by `v_student_live_status`, which hides sensitive academic details and exposes only what students need for room discovery.
           </p>
@@ -603,6 +670,21 @@ def student_dashboard(user: sqlite3.Row, params: dict[str, list[str]], message: 
         </div>
         <div class="card">
           <h3>Quick Filter</h3>
+          <div class="stats spaced">
+            <div class="stat-box">
+              <strong>{len(rooms)}</strong>
+              <div class="small muted">visible rooms after current filters</div>
+            </div>
+            <div class="stat-box">
+              <strong>{available_now}</strong>
+              <div class="small muted">rooms currently calm or ready to use</div>
+            </div>
+            <div class="stat-box">
+              <strong>{approved_count}</strong>
+              <div class="small muted">approved requests for this student</div>
+            </div>
+          </div>
+          <div class="spaced"></div>
           <form method="get" action="/dashboard">
             <label>Block
               <select name="block">
@@ -630,7 +712,10 @@ def student_dashboard(user: sqlite3.Row, params: dict[str, list[str]], message: 
                 <option value="1" {"selected" if params.get("smart_board", [""])[0] == "1" else ""}>Required</option>
               </select>
             </label>
-            <button class="button-accent" type="submit">Apply Filters</button>
+            <div class="grid-2">
+              <button class="button-accent" type="submit">Apply Filters</button>
+              <a class="button-link" href="/dashboard">Reset Filters</a>
+            </div>
           </form>
         </div>
       </div>
@@ -646,7 +731,11 @@ def student_dashboard(user: sqlite3.Row, params: dict[str, list[str]], message: 
 
       <aside class="card">
         <h3>Create Reservation Request</h3>
-        <p class="muted small">Students submit requests as `Pending`. Approval is controlled by academics and validated by database triggers.</p>
+        <p class="muted small">Students submit requests as `Pending`. Approval is controlled by academics and validated by database triggers, so frontend actions stay consistent with backend rules.</p>
+        <div class="pill-row">
+          <div class="pill">Pending: {pending_count}</div>
+          <div class="pill">Approved: {approved_count}</div>
+        </div>
         <form method="post" action="/requests/new">
           <label>Room
             <select name="room_id" required>
@@ -819,7 +908,10 @@ def academic_dashboard(user: sqlite3.Row, message: str = "", error: bool = False
       <div class="hero-grid">
         <div>
           <div class="eyebrow">Academic Dashboard</div>
-          <h2>Plan lectures and exams with conflict-aware support</h2>
+          <div class="welcome-line">
+            <h2>Welcome back, Dr. {h(user["name"].split()[0])}</h2>
+            <span class="badge info">{h(user["department_name"])}</span>
+          </div>
           <p class="muted">
             The academic dashboard combines `Academic_Schedules`, `Event_Requests`, and `v_exam_coordination` so planning decisions remain data-driven and safe.
           </p>
@@ -838,6 +930,7 @@ def academic_dashboard(user: sqlite3.Row, message: str = "", error: bool = False
           <div class="stats">
             <div class="stat-box"><strong>{len(pending)}</strong><div class="small muted">Pending requests waiting for academic review</div></div>
             <div class="stat-box"><strong>{len(coordination)}</strong><div class="small muted">Exam coordination records in analytical view</div></div>
+            <div class="stat-box"><strong>{len(conflict_rows)}</strong><div class="small muted">active overlaps shown in conflict feed</div></div>
           </div>
         </div>
       </div>

@@ -116,6 +116,7 @@ The student experience is designed to be more user friendly and task-oriented:
 - quick filter for block, projector, smart board, and outlet count
 - direct reservation request form
 - personal request history
+- a clickable Yildiz-inspired logo that returns the signed-in student to the main dashboard
 
 All room cards are read from `v_student_live_status`, so the UI stays aligned with privacy requirements.
 
@@ -127,8 +128,19 @@ The academic experience focuses on coordination and decision support:
 - exam coordination summary from `v_exam_coordination`
 - pending request approval table
 - conflict feed based on schedule and reservation overlap logic
+- the same logo-driven return-to-home behavior after login
 
 This interface demonstrates how SQL outputs can be turned into practical operational screens.
+
+### Frontend and Database Harmony
+
+The frontend is intentionally designed to stay in sync with the SQLite backend:
+
+- login options are read from seeded `Users` data
+- student room cards are read from `v_student_live_status`
+- request submission writes directly into `Event_Requests`
+- academic approval actions update the same table and immediately reflect SQL trigger rules
+- the top-left logo acts as a stable navigation anchor and always returns the active user to their own home screen
 
 ## How Conflict Detection Works
 

@@ -47,8 +47,36 @@
       backdrop-filter: blur(12px);
     }
 
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      padding: 18px 24px 0;
+    }
+
+    .brand-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 14px;
+      text-decoration: none;
+      color: inherit;
+    }
+
+    .brand-mark {
+      width: 58px;
+      height: 58px;
+      filter: drop-shadow(0 10px 24px rgba(22, 37, 33, 0.16));
+    }
+
+    .brand-copy {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
     .hero {
-      padding: 28px 28px 20px;
+      padding: 20px 28px 20px;
       border-bottom: 1px solid var(--line);
       background:
         linear-gradient(135deg, rgba(255,255,255,0.55), rgba(255,255,255,0.15)),
@@ -107,6 +135,13 @@
       padding: 24px 28px 32px;
       display: grid;
       gap: 20px;
+    }
+
+    .login-strip {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+      margin-top: 20px;
     }
 
     .panel {
@@ -297,7 +332,8 @@
         grid-template-columns: 1fr;
       }
 
-      .heatmap {
+      .heatmap,
+      .login-strip {
         grid-template-columns: 1fr;
       }
     }
@@ -305,12 +341,48 @@
 </head>
 <body>
   <main class="shell">
+    <div class="topbar">
+      <a class="brand-link" href="#" id="logo-home" title="Return to home">
+        <div class="brand-mark">
+          <svg viewBox="0 0 80 80" aria-hidden="true" role="img">
+            <defs>
+              <linearGradient id="protoGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stop-color="#f1b25a" />
+                <stop offset="100%" stop-color="#d95d39" />
+              </linearGradient>
+            </defs>
+            <rect x="4" y="4" width="72" height="72" rx="22" fill="#17363a" />
+            <path d="M40 12l5.6 13.8 14.9 1.1-11.4 9.5 3.7 14.2L40 42.4 27.2 50.6l3.7-14.2-11.4-9.5 14.9-1.1z" fill="url(#protoGrad)" />
+            <rect x="24" y="45" width="32" height="16" rx="4" fill="#fff6ea" />
+            <rect x="29" y="50" width="7" height="11" rx="1.5" fill="#17363a" />
+            <rect x="38" y="50" width="7" height="11" rx="1.5" fill="#17363a" />
+            <rect x="47" y="50" width="4" height="11" rx="1.5" fill="#17363a" />
+            <path d="M23 63h34" stroke="#fff6ea" stroke-width="3" stroke-linecap="round" />
+          </svg>
+        </div>
+        <div class="brand-copy">
+          <div class="eyebrow">YTU Applied SQL Demo</div>
+          <strong>KMF Smart Classroom</strong>
+          <span class="muted small">Click logo to return to the active home view</span>
+        </div>
+      </a>
+    </div>
     <section class="hero">
       <div class="eyebrow">KMF Faculty Intelligence Layer</div>
       <h1>Smart Classroom & Event Management</h1>
       <p class="sub">
         A role-based concept interface for the YTU MTM4692 project. The Student side focuses on fast room discovery with live occupancy signals, while the Academic side emphasizes planning quality, conflict prevention, and exam coordination.
       </p>
+      <div class="login-strip">
+        <div class="panel">
+          <h3>Student Entry</h3>
+          <p class="muted">Friendly access to live room discovery, equipment filters, and reservation requests.</p>
+        </div>
+        <div class="panel">
+          <h3>Academic Entry</h3>
+          <p class="muted">Conflict-aware planning, exam coordination, and request approval workflow.</p>
+        </div>
+      </div>
       <div class="role-tabs" aria-label="Role switcher">
         <button class="role-btn active" data-role="student">Student Login</button>
         <button class="role-btn" data-role="academic">Academic Login</button>
@@ -497,6 +569,8 @@
     const buttons = document.querySelectorAll(".role-btn");
     const studentScreen = document.getElementById("student");
     const academicScreen = document.getElementById("academic");
+    const logoHome = document.getElementById("logo-home");
+    let activeRole = "student";
 
     buttons.forEach((button) => {
       button.addEventListener("click", () => {
@@ -504,11 +578,21 @@
         button.classList.add("active");
 
         const role = button.dataset.role;
+        activeRole = role;
         const studentActive = role === "student";
 
         studentScreen.classList.toggle("active", studentActive);
         academicScreen.classList.toggle("active", !studentActive);
       });
+    });
+
+    logoHome.addEventListener("click", (event) => {
+      event.preventDefault();
+      if (activeRole === "student") {
+        studentScreen.scrollIntoView({ behavior: "smooth", block: "start" });
+      } else {
+        academicScreen.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
     });
   </script>
 </body>
