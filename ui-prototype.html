@@ -581,8 +581,12 @@
         activeRole = role;
         const studentActive = role === "student";
 
-        studentScreen.classList.toggle("active", studentActive);
-        academicScreen.classList.toggle("active", !studentActive);
+        // Navigate to sign in page based on role
+        if (role === "student") {
+          window.location.href = "/signin";
+        } else {
+          window.location.href = "/signin?role=academic";
+        }
       });
     });
 

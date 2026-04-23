@@ -1010,6 +1010,14 @@ class KMFHandler(BaseHTTPRequestHandler):
             self.respond_html(signup_page(params.get("message", [""])[0], params.get("error", ["0"])[0] == "1"))
             return
 
+        if parsed.path == "/proto":
+            proto_html = (BASE_DIR / "ui-prototype.html").read_text(encoding="utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(proto_html.encode("utf-8"))
+            return
+
         if parsed.path == "/dashboard":
             if user is None:
                 self.redirect("/?message=Please+sign+in+first&error=1")
