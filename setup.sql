@@ -33,6 +33,7 @@ CREATE TABLE Users (
     department_id INTEGER NOT NULL,
     name TEXT NOT NULL,
     email TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
     role TEXT NOT NULL CHECK (role IN ('Student', 'Academic')),
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (department_id) REFERENCES Departments(department_id)
@@ -362,17 +363,17 @@ INSERT INTO Departments (department_id, department_name, department_code) VALUES
     (4, 'Food Engineering', 'FOOD'),
     (5, 'Bioengineering', 'BIOE');
 
-INSERT INTO Users (user_id, department_id, name, email, role) VALUES
-    (1, 1, 'Ayse Demir', 'ayse.demir@ytu.edu.tr', 'Academic'),
-    (2, 2, 'Mehmet Kaya', 'mehmet.kaya@ytu.edu.tr', 'Academic'),
-    (3, 3, 'Selin Arslan', 'selin.arslan@ytu.edu.tr', 'Academic'),
-    (4, 4, 'Can Yilmaz', 'can.yilmaz@std.yildiz.edu.tr', 'Student'),
-    (5, 5, 'Zeynep Acar', 'zeynep.acar@std.yildiz.edu.tr', 'Student'),
-    (6, 1, 'Berk Gunes', 'berk.gunes@std.yildiz.edu.tr', 'Student'),
-    (7, 2, 'Elif Kurt', 'elif.kurt@ytu.edu.tr', 'Academic'),
-    (8, 3, 'Mert Sahin', 'mert.sahin@std.yildiz.edu.tr', 'Student'),
-    (9, 4, 'Deniz Ozturk', 'deniz.ozturk@std.yildiz.edu.tr', 'Student'),
-    (10, 5, 'Seda Inan', 'seda.inan@ytu.edu.tr', 'Academic');
+INSERT INTO Users (user_id, department_id, name, email, password_hash, role) VALUES
+    (1, 1, 'Ayse Demir', 'ayse.demir@ytu.edu.tr', 'ef61a579c907bbed674c0dbcbcf7f7af8f851538eef7b8e58c5bee0b8', 'Academic'),
+    (2, 2, 'Mehmet Kaya', 'mehmet.kaya@ytu.edu.tr', 'ef61a579c907bbed674c0dbcbcf7f7af8f851538eef7b8e58c5bee0b8', 'Academic'),
+    (3, 3, 'Selin Arslan', 'selin.arslan@ytu.edu.tr', 'ef61a579c907bbed674c0dbcbcf7f7af8f851538eef7b8e58c5bee0b8', 'Academic'),
+    (4, 4, 'Can Yilmaz', 'can.yilmaz@std.yildiz.edu.tr', 'ef61a579c907bbed674c0dbcbcf7f7af8f851538eef7b8e58c5bee0b8', 'Student'),
+    (5, 5, 'Zeynep Acar', 'zeynep.acar@std.yildiz.edu.tr', 'ef61a579c907bbed674c0dbcbcf7f7af8f851538eef7b8e58c5bee0b8', 'Student'),
+    (6, 1, 'Berk Gunes', 'berk.gunes@std.yildiz.edu.tr', 'ef61a579c907bbed674c0dbcbcf7f7af8f851538eef7b8e58c5bee0b8', 'Student'),
+    (7, 2, 'Elif Kurt', 'elif.kurt@ytu.edu.tr', 'ef61a579c907bbed674c0dbcbcf7f7af8f851538eef7b8e58c5bee0b8', 'Academic'),
+    (8, 3, 'Mert Sahin', 'mert.sahin@std.yildiz.edu.tr', 'ef61a579c907bbed674c0dbcbcf7f7af8f851538eef7b8e58c5bee0b8', 'Student'),
+    (9, 4, 'Deniz Ozturk', 'deniz.ozturk@std.yildiz.edu.tr', 'ef61a579c907bbed674c0dbcbcf7f7af8f851538eef7b8e58c5bee0b8', 'Student'),
+    (10, 5, 'Seda Inan', 'seda.inan@ytu.edu.tr', 'ef61a579c907bbed674c0dbcbcf7f7af8f851538eef7b8e58c5bee0b8', 'Academic');
 
 INSERT INTO Classrooms (room_id, room_code, block, floor, capacity, specs) VALUES
     (101, 'A-101', 'A', 1, 40, '{"projector":true,"power_outlets":24,"smart_board":true,"air_conditioning":true}'),

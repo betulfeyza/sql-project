@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import hashlib
 import secrets
 import sqlite3
 from http import cookies
@@ -452,23 +453,46 @@ def get_current_user(handler: BaseHTTPRequestHandler) -> sqlite3.Row | None:
         ).fetchone()
 
 
-def login_page(message: str = "", error: bool = False) -> str:
+def signin_page(message: str = "", error: bool = False) -> str:
+    flash = ""
+    if message:
+        flash_class = "error" if error else "success"
+        flash = f'<div class="flash {flash_class}">{h(message)}</div>'
+
+    content = f"""
+    <section class="hero">
+      <div class="hero-grid">
+        <div>
+          <div class="eyebrow">KMF Smart Classroom System</div>
+          <h2>Sign In to Your Account</h2>
+          <p class="muted">
+            Access the classroom management system for students and academics.
+            Sign in with your email and password.
+          </p>
+          {flash}
+          <div class="spaced">
+            <p class="small muted">Don't have an account? <a href="/signup">Sign up as a student</a></p>
+          </div>
+        </div>
+        <div class="card">
+          <form method="post" action="/login">
+            <label for="email">Email</label>
+            <input type="email" id="email" name="email" required autofocus>
+            <label for="password">Password</label>
+            <input type="password" id="password" name="password" required>
+            <button class="button-accent" type="submit">Sign In</button>
+          </form>
+        </div>
+      </div>
+    </section>
+    """
+    return render_layout("Sign In", content)
+
+
+def signup_page(message: str = "", error: bool = False) -> str:
     with get_connection() as conn:
-        students = conn.execute(
-            """
-            SELECT user_id, name, email
-            FROM Users
-            WHERE role = 'Student'
-            ORDER BY name
-            """
-        ).fetchall()
-        academics = conn.execute(
-            """
-            SELECT user_id, name, email
-            FROM Users
-            WHERE role = 'Academic'
-            ORDER BY name
-            """
+        departments = conn.execute(
+            "SELECT department_id, department_name FROM Departments ORDER BY department_name"
         ).fetchall()
 
     flash = ""
@@ -476,65 +500,48 @@ def login_page(message: str = "", error: bool = False) -> str:
         flash_class = "error" if error else "success"
         flash = f'<div class="flash {flash_class}">{h(message)}</div>'
 
-    student_options = "".join(
-        f'<option value="{h(row["email"])}">{h(row["name"])} - {h(row["email"])}</option>'
-        for row in students
-    )
-    academic_options = "".join(
-        f'<option value="{h(row["email"])}">{h(row["name"])} - {h(row["email"])}</option>'
-        for row in academics
+    dept_options = "".join(
+        f'<option value="{row["department_id"]}">{h(row["department_name"])}</option>'
+        for row in departments
     )
 
     content = f"""
     <section class="hero">
       <div class="hero-grid">
         <div>
-          <div class="eyebrow">Course Project Demo</div>
-          <h2>Database-driven campus planning experience</h2>
+          <div class="eyebrow">KMF Smart Classroom System</div>
+          <h2>Create Your Student Account</h2>
           <p class="muted">
-            This interface is connected directly to the SQLite database prepared for the Applied SQL assignment in Mathematical Engineering.
-            Students explore live room availability, while academics coordinate schedules, exams, and request approvals from the same data source.
+            Join the classroom management system as a student.
+            Fill in your details to sign up.
           </p>
-          <div class="pill-row">
-            <div class="pill">3NF schema</div>
-            <div class="pill">Foreign key integrity</div>
-            <div class="pill">Trigger-based conflict detection</div>
-            <div class="pill">Role-based dashboards</div>
-          </div>
           {flash}
+          <div class="spaced">
+            <p class="small muted">Already have an account? <a href="/signin">Sign in</a></p>
+          </div>
         </div>
         <div class="card">
-          <h3>Demo Login</h3>
-          <p class="muted small">Passwords are intentionally omitted for classroom demonstration. Select a seeded user and continue.</p>
-          <div class="login-cards">
-            <form method="post" action="/login" class="card">
-              <h4>Student Login</h4>
-              <input type="hidden" name="role" value="Student">
-              <label>Email
-                <select name="email" required>
-                  <option value="">Choose a student</option>
-                  {student_options}
-                </select>
-              </label>
-              <button class="button-accent" type="submit">Open Student Dashboard</button>
-            </form>
-            <form method="post" action="/login" class="card">
-              <h4>Academic Login</h4>
-              <input type="hidden" name="role" value="Academic">
-              <label>Email
-                <select name="email" required>
-                  <option value="">Choose an academic</option>
-                  {academic_options}
-                </select>
-              </label>
-              <button type="submit">Open Academic Dashboard</button>
-            </form>
-          </div>
+          <form method="post" action="/register">
+            <label for="name">Full Name</label>
+            <input type="text" id="name" name="name" required>
+            <label for="email">Email</label>
+            <input type="email" id="email" name="email" required>
+            <label for="department">Department</label>
+            <select id="department" name="department_id" required>
+              <option value="">Select your department</option>
+              {dept_options}
+            </select>
+            <label for="password">Password</label>
+            <input type="password" id="password" name="password" required minlength="6">
+            <label for="confirm_password">Confirm Password</label>
+            <input type="password" id="confirm_password" name="confirm_password" required>
+            <button class="button-accent" type="submit">Sign Up</button>
+          </form>
         </div>
       </div>
     </section>
     """
-    return render_layout("KMF Login", content)
+    return render_layout("Sign Up", content)
 
 
 def student_dashboard(user: sqlite3.Row, params: dict[str, list[str]], message: str = "", error: bool = False) -> str:
@@ -983,7 +990,24 @@ class KMFHandler(BaseHTTPRequestHandler):
         user = get_current_user(self)
 
         if parsed.path == "/":
-            self.respond_html(login_page(params.get("message", [""])[0], params.get("error", ["0"])[0] == "1"))
+            if user is not None:
+                self.redirect("/dashboard")
+                return
+            self.respond_html(signin_page(params.get("message", [""])[0], params.get("error", ["0"])[0] == "1"))
+            return
+
+        if parsed.path == "/signin":
+            if user is not None:
+                self.redirect("/dashboard")
+                return
+            self.respond_html(signin_page(params.get("message", [""])[0], params.get("error", ["0"])[0] == "1"))
+            return
+
+        if parsed.path == "/signup":
+            if user is not None:
+                self.redirect("/dashboard")
+                return
+            self.respond_html(signup_page(params.get("message", [""])[0], params.get("error", ["0"])[0] == "1"))
             return
 
         if parsed.path == "/dashboard":
@@ -1009,19 +1033,24 @@ class KMFHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/login":
             email = form.get("email", "").strip()
-            role = form.get("role", "").strip()
+            password = form.get("password", "").strip()
+            if not email or not password:
+                self.redirect("/signin?message=Email+and+password+are+required&error=1")
+                return
+
+            password_hash = hashlib.sha256(password.encode()).hexdigest()
             with get_connection() as conn:
                 db_user = conn.execute(
                     """
                     SELECT user_id, name, email, role
                     FROM Users
-                    WHERE email = ? AND role = ?
+                    WHERE email = ? AND password_hash = ?
                     """,
-                    (email, role),
+                    (email, password_hash),
                 ).fetchone()
 
             if db_user is None:
-                self.redirect("/?message=Selected+demo+user+could+not+be+found&error=1")
+                self.redirect("/signin?message=Invalid+email+or+password&error=1")
                 return
 
             session_id = secrets.token_hex(16)
@@ -1034,6 +1063,42 @@ class KMFHandler(BaseHTTPRequestHandler):
             self.send_header("Location", "/dashboard")
             self.send_header("Set-Cookie", cookie.output(header="").strip())
             self.end_headers()
+            return
+
+        if parsed.path == "/register":
+            name = form.get("name", "").strip()
+            email = form.get("email", "").strip()
+            department_id = form.get("department_id", "").strip()
+            password = form.get("password", "").strip()
+            confirm_password = form.get("confirm_password", "").strip()
+
+            if not all([name, email, department_id, password, confirm_password]):
+                self.redirect("/signup?message=All+fields+are+required&error=1")
+                return
+            if password != confirm_password:
+                self.redirect("/signup?message=Passwords+do+not+match&error=1")
+                return
+            if len(password) < 6:
+                self.redirect("/signup?message=Password+must+be+at+least+6+characters&error=1")
+                return
+            if "@" not in email:
+                self.redirect("/signup?message=Invalid+email+address&error=1")
+                return
+
+            password_hash = hashlib.sha256(password.encode()).hexdigest()
+            try:
+                with get_connection() as conn:
+                    conn.execute(
+                        """
+                        INSERT INTO Users (department_id, name, email, password_hash, role)
+                        VALUES (?, ?, ?, ?, 'Student')
+                        """,
+                        (int(department_id), name, email, password_hash),
+                    )
+                    conn.commit()
+                self.redirect("/signin?message=Account+created+successfully.+Please+sign+in.")
+            except sqlite3.IntegrityError:
+                self.redirect("/signup?message=Email+already+exists&error=1")
             return
 
         if parsed.path == "/logout":
