@@ -333,6 +333,163 @@
       }
     }
 
+    .modal {
+      display: none;
+      position: fixed;
+      z-index: 1000;
+      left: 0;
+      top: 0;
+      width: 100%;
+      height: 100%;
+      background-color: rgba(22, 37, 33, 0.4);
+      backdrop-filter: blur(4px);
+      animation: fadeIn 200ms ease;
+    }
+
+    .modal.active {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .modal-content {
+      background: var(--paper);
+      border-radius: 24px;
+      padding: 32px 28px;
+      width: 90%;
+      max-width: 420px;
+      box-shadow: var(--shadow);
+      border: 1px solid var(--line);
+      animation: slideUp 300ms ease;
+    }
+
+    .modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 24px;
+    }
+
+    .modal-header h2 {
+      margin: 0;
+      font-size: 1.6rem;
+      color: var(--ink);
+    }
+
+    .close-btn {
+      background: none;
+      border: none;
+      font-size: 28px;
+      cursor: pointer;
+      color: var(--muted);
+      transition: color 180ms ease;
+      padding: 0;
+      width: 36px;
+      height: 36px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .close-btn:hover {
+      color: var(--ink);
+    }
+
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-bottom: 18px;
+    }
+
+    .form-group label {
+      font-size: 0.9rem;
+      font-weight: 500;
+      color: var(--ink);
+    }
+
+    .form-group input {
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      font-family: inherit;
+      font-size: 1rem;
+      transition: border-color 180ms ease, box-shadow 180ms ease;
+    }
+
+    .form-group input:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(217, 93, 57, 0.1);
+    }
+
+    .form-actions {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      margin-top: 24px;
+    }
+
+    .btn-primary {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      padding: 12px 16px;
+      border-radius: 12px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 180ms ease, background 180ms ease;
+    }
+
+    .btn-primary:hover {
+      background: #c74a2a;
+      transform: translateY(-2px);
+    }
+
+    .form-footer {
+      text-align: center;
+      margin-top: 16px;
+      font-size: 0.9rem;
+      color: var(--muted);
+    }
+
+    .form-footer button {
+      background: none;
+      border: none;
+      color: var(--accent);
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 0.9rem;
+      padding: 0;
+      text-decoration: underline;
+      transition: color 180ms ease;
+    }
+
+    .form-footer button:hover {
+      color: #c74a2a;
+    }
+
+    @keyframes fadeIn {
+      from {
+        opacity: 0;
+      }
+      to {
+        opacity: 1;
+      }
+    }
+
+    @keyframes slideUp {
+      from {
+        transform: translateY(20px);
+        opacity: 0;
+      }
+      to {
+        transform: translateY(0);
+        opacity: 1;
+      }
+    }
+
     @media (max-width: 900px) {
       .grid,
       .split {
@@ -342,6 +499,11 @@
       .heatmap,
       .login-strip {
         grid-template-columns: 1fr;
+      }
+
+      .modal-content {
+        width: 85%;
+        padding: 24px 20px;
       }
     }
   </style>
@@ -572,6 +734,66 @@
     </section>
   </main>
 
+  <!-- Sign In Modal -->
+  <div class="modal" id="signInModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>Sign In</h2>
+        <button class="close-btn" id="closeSignIn">&times;</button>
+      </div>
+      <form id="signInForm">
+        <div class="form-group">
+          <label for="signInEmail">Email or Username</label>
+          <input type="text" id="signInEmail" name="email" placeholder="you@example.com" required>
+        </div>
+        <div class="form-group">
+          <label for="signInPassword">Password</label>
+          <input type="password" id="signInPassword" name="password" placeholder="••••••••" required>
+        </div>
+        <div class="form-actions">
+          <button type="submit" class="btn-primary">Sign In</button>
+        </div>
+        <div class="form-footer">
+          Don't have an account? <button type="button" id="switchToSignUp">Sign Up</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Sign Up Modal -->
+  <div class="modal" id="signUpModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>Sign Up</h2>
+        <button class="close-btn" id="closeSignUp">&times;</button>
+      </div>
+      <form id="signUpForm">
+        <div class="form-group">
+          <label for="signUpName">Full Name</label>
+          <input type="text" id="signUpName" name="name" placeholder="John Doe" required>
+        </div>
+        <div class="form-group">
+          <label for="signUpEmail">Email</label>
+          <input type="email" id="signUpEmail" name="email" placeholder="you@example.com" required>
+        </div>
+        <div class="form-group">
+          <label for="signUpPassword">Password</label>
+          <input type="password" id="signUpPassword" name="password" placeholder="••••••••" required>
+        </div>
+        <div class="form-group">
+          <label for="signUpConfirm">Confirm Password</label>
+          <input type="password" id="signUpConfirm" name="confirm" placeholder="••••••••" required>
+        </div>
+        <div class="form-actions">
+          <button type="submit" class="btn-primary">Create Account</button>
+        </div>
+        <div class="form-footer">
+          Already have an account? <button type="button" id="switchToSignIn">Sign In</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <script>
     const buttons = document.querySelectorAll(".role-btn");
     const studentScreen = document.getElementById("student");
@@ -579,6 +801,7 @@
     const logoHome = document.getElementById("logo-home");
     let activeRole = "student";
 
+    // Role switching
     buttons.forEach((button) => {
       button.addEventListener("click", () => {
         buttons.forEach((btn) => btn.classList.remove("active"));
@@ -600,6 +823,102 @@
       } else {
         academicScreen.scrollIntoView({ behavior: "smooth", block: "start" });
       }
+    });
+
+    // Sign In / Sign Up Modal Logic
+    const signInModal = document.getElementById("signInModal");
+    const signUpModal = document.getElementById("signUpModal");
+    const closeSignInBtn = document.getElementById("closeSignIn");
+    const closeSignUpBtn = document.getElementById("closeSignUp");
+    const switchToSignUpBtn = document.getElementById("switchToSignUp");
+    const switchToSignInBtn = document.getElementById("switchToSignIn");
+    const signInForm = document.getElementById("signInForm");
+    const signUpForm = document.getElementById("signUpForm");
+
+    function openSignInModal() {
+      signUpModal.classList.remove("active");
+      signInModal.classList.add("active");
+    }
+
+    function openSignUpModal() {
+      signInModal.classList.remove("active");
+      signUpModal.classList.add("active");
+    }
+
+    function closeModals() {
+      signInModal.classList.remove("active");
+      signUpModal.classList.remove("active");
+    }
+
+    // Get all login buttons (both Student and Academic)
+    const studentLoginBtn = buttons[0];
+    const academicLoginBtn = buttons[1];
+
+    // Attach click handlers to login buttons
+    studentLoginBtn.addEventListener("click", () => {
+      // Switch to student first, then open sign in
+      buttons.forEach((btn) => btn.classList.remove("active"));
+      studentLoginBtn.classList.add("active");
+      studentScreen.classList.add("active");
+      academicScreen.classList.remove("active");
+      activeRole = "student";
+      openSignInModal();
+    });
+
+    academicLoginBtn.addEventListener("click", () => {
+      // Switch to academic first, then open sign in
+      buttons.forEach((btn) => btn.classList.remove("active"));
+      academicLoginBtn.classList.add("active");
+      academicScreen.classList.add("active");
+      studentScreen.classList.remove("active");
+      activeRole = "academic";
+      openSignInModal();
+    });
+
+    // Modal controls
+    closeSignInBtn.addEventListener("click", closeModals);
+    closeSignUpBtn.addEventListener("click", closeModals);
+    switchToSignUpBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      openSignUpModal();
+    });
+    switchToSignInBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      openSignInModal();
+    });
+
+    // Close modal when clicking outside
+    window.addEventListener("click", (event) => {
+      if (event.target === signInModal || event.target === signUpModal) {
+        closeModals();
+      }
+    });
+
+    // Form submission handlers
+    signInForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const email = document.getElementById("signInEmail").value;
+      const password = document.getElementById("signInPassword").value;
+      alert(`Signing in with:\nEmail: ${email}\nPassword: ${password.replace(/./g, "•")}\n\n(This is a prototype demo)`);
+      closeModals();
+      signInForm.reset();
+    });
+
+    signUpForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const name = document.getElementById("signUpName").value;
+      const email = document.getElementById("signUpEmail").value;
+      const password = document.getElementById("signUpPassword").value;
+      const confirm = document.getElementById("signUpConfirm").value;
+
+      if (password !== confirm) {
+        alert("Passwords do not match!");
+        return;
+      }
+
+      alert(`Account created:\nName: ${name}\nEmail: ${email}\n\n(This is a prototype demo)`);
+      closeModals();
+      signUpForm.reset();
     });
   </script>
 </body>
