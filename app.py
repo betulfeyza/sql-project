@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import hashlib
 import secrets
+import string
 import sqlite3
 from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -52,6 +53,288 @@ def room_badge(percent: float) -> str:
 
 def h(value: object) -> str:
     return html.escape("" if value is None else str(value))
+
+
+def password_policy_error(password: str) -> str | None:
+    if len(password) < 6:
+        return "Password must be at least 6 characters"
+    if not any(c.isupper() for c in password):
+        return "Password must contain at least one uppercase letter"
+    if not any(c.isdigit() for c in password):
+        return "Password must contain at least one digit"
+    if not any(c in string.punctuation for c in password):
+        return "Password must contain at least one punctuation character"
+    return None
+
+
+LANG_COOKIE = "kmf_lang"
+DEFAULT_LANGUAGE = "en"
+SUPPORTED_LANGUAGES = {"en", "tr"}
+
+TRANSLATIONS: dict[str, dict[str, str]] = {
+    "en": {
+        "brand_eyebrow": "YTU Mathematical Engineering • Applied SQL",
+        "brand_title": "KMF Smart Classroom & Event Management System",
+        "brand_subtitle": "Yildiz-inspired classroom intelligence dashboard",
+        "logo_click_hint": "Click the logo anytime to return to your home screen.",
+        "signed_in_as": "Signed in as",
+        "sign_out": "Sign out",
+        "sqlite_note": "SQLite-backed demo application",
+        "sign_in_title": "Sign In to Your Account",
+        "sign_in_description": "Access the classroom management system for students and academics. Sign in with your email and password.",
+        "no_account": "Don't have an account?",
+        "sign_up_as_student": "Sign up as a student",
+        "create_account_title": "Create Your Student Account",
+        "create_account_description": "Join the classroom management system as a student. Fill in your details to sign up.",
+        "already_account": "Already have an account?",
+        "sign_in_link": "Sign in",
+        "full_name": "Full Name",
+        "email": "Email",
+        "department": "Department",
+        "password": "Password",
+        "confirm_password": "Confirm Password",
+        "password_requirements": "Password must include at least one uppercase letter, one digit, and one punctuation mark.",
+        "select_department": "Select your department",
+        "sign_up_button": "Sign Up",
+        "sign_in_button": "Sign In",
+        "student_dashboard": "Student Dashboard",
+        "welcome_back": "Welcome back, {name}",
+        "find_room_text": "Find the right room in a few seconds. The interface stays tightly connected to SQLite, so filters, live room cards, and reservation history all reflect current database values.",
+        "live_map_info": "The live map is powered by `v_student_live_status`, which hides sensitive academic details and exposes only what students need for room discovery.",
+        "pill_live_availability": "Live availability",
+        "pill_heatmap": "Heatmap occupancy",
+        "pill_smart_filter": "Smart equipment filter",
+        "quick_filter": "Quick Filter",
+        "visible_rooms": "visible rooms after current filters",
+        "rooms_ready": "rooms currently calm or ready to use",
+        "approved_requests": "approved requests for this student",
+        "block_label": "Block",
+        "floor": "Floor",
+        "seats": "seats",
+        "all_blocks": "All blocks",
+        "minimum_power_outlets": "Minimum power outlets",
+        "no_preference": "No preference",
+        "projector_label": "Projector",
+        "smart_board_label": "Smart board",
+        "any": "Any",
+        "required": "Required",
+        "apply_filters": "Apply Filters",
+        "reset_filters": "Reset Filters",
+        "live_room_heatmap": "Live Room Heatmap",
+        "no_rooms_match": "No room matches the current filter.",
+        "try_removing_constraints": "Try removing one or more constraints.",
+        "create_reservation_request": "Create Reservation Request",
+        "request_note_hint": "Need projector and 20+ power outlets",
+        "submit_request": "Submit Request",
+        "my_requests": "My Requests",
+        "title": "Title",
+        "type": "Type",
+        "room": "Room",
+        "start": "Start",
+        "status": "Status",
+        "no_requests_yet": "No reservation request has been created by this student yet.",
+        "end": "End",
+        "event_type_workshop": "Workshop",
+        "event_type_club": "Club",
+        "event_type_makeup": "Make-up exam",
+        "date_format": "dd.mm.yyyy",
+        "event_type_exam": "Exam",
+        "event_type_seminar": "Seminar",
+        "academic_dashboard": "Academic Dashboard",
+        "welcome_back_dr": "Welcome back, Dr. {name}",
+        "academic_description": "The academic dashboard combines `Academic_Schedules`, `Event_Requests`, and `v_exam_coordination` so planning decisions remain data-driven and safe.",
+        "schedule_optimizer": "Schedule optimizer",
+        "conflict_detection": "Conflict detection",
+        "approval_workflow": "Approval workflow",
+        "conflict_logic_summary": "Conflict Logic Summary",
+        "conflict_summary_text": "A booking is rejected when `new.start_at < existing.end_at` and `new.end_at > existing.start_at` for the same room. This rule is enforced at database level through triggers.",
+        "pending_requests_waiting": "Pending requests waiting for academic review",
+        "exam_coordination_records": "Exam coordination records in analytical view",
+        "active_overlaps": "active overlaps shown in conflict feed",
+        "my_schedule": "My Schedule",
+        "exam_coordination": "Exam Coordination",
+        "pending_requests_title": "Pending Requests",
+        "requester": "Requester",
+        "decision": "Decision",
+        "approve": "Approve",
+        "reject": "Reject",
+        "no_pending_requests": "There is no pending request right now.",
+        "conflict_detection_feed": "Conflict Detection Feed",
+        "current_state": "Current state",
+        "no_active_conflict": "No active conflict is detected in pending or approved requests.",
+        "clear": "Clear",
+        "request_submitted_success": "Request submitted successfully",
+        "only_students_submit": "Only students can submit requests",
+        "only_academics_review": "Only academic users can review requests",
+        "unsupported_decision": "Unsupported decision",
+        "request_approved_success": "Request approved successfully",
+        "request_rejected_success": "Request rejected successfully",
+        "all_fields_required": "All fields are required",
+        "invalid_email": "Invalid email address",
+        "passwords_do_not_match": "Passwords do not match",
+        "account_created": "Account created successfully. Please sign in.",
+        "email_exists": "Email already exists",
+        "yes": "Yes",
+        "no": "No",
+    },
+    "tr": {
+        "brand_eyebrow": "YTÜ Matematik Mühendisliği • Uygulamalı SQL",
+        "brand_title": "KMF Akıllı Sınıf ve Etkinlik Yönetim Sistemi",
+        "brand_subtitle": "Yıldız ilhamlı sınıf zeka panosu",
+        "logo_click_hint": "Ev ekranına geri dönmek için her zaman logoya tıklayabilirsiniz.",
+        "signed_in_as": "Giriş yapan",
+        "sign_out": "Çıkış yap",
+        "sqlite_note": "SQLite destekli demo uygulama",
+        "sign_in_title": "Hesabınıza Giriş Yapın",
+        "sign_in_description": "Öğrenciler ve akademisyenler için sınıf yönetim sistemine erişin. E-posta ve parolanızla giriş yapın.",
+        "no_account": "Hesabın yok mu?",
+        "sign_up_as_student": "Öğrenci olarak kaydol",
+        "create_account_title": "Öğrenci Hesabınızı Oluşturun",
+        "create_account_description": "Sınıf yönetim sistemine öğrenci olarak katılın. Kayıt olmak için bilgilerinizi doldurun.",
+        "already_account": "Zaten hesabınız var mı?",
+        "sign_in_link": "Giriş yap",
+        "full_name": "Ad Soyad",
+        "email": "E-posta",
+        "department": "Bölüm",
+        "password": "Parola",
+        "confirm_password": "Parola Onayı",
+        "password_requirements": "Parola en az bir büyük harf, bir rakam ve bir noktalama işareti içermelidir.",
+        "select_department": "Bölümünüzü seçin",
+        "sign_up_button": "Kayıt Ol",
+        "sign_in_button": "Giriş Yap",
+        "student_dashboard": "Öğrenci Paneli",
+        "welcome_back": "Tekrar hoş geldin, {name}",
+        "find_room_text": "Doğru sınıfı birkaç saniye içinde bulun. Arayüz SQLite ile sıkı şekilde bağlı kaldığı için filtreler, canlı sınıf kartları ve rezervasyon geçmişi güncel verileri yansıtır.",
+        "live_map_info": "Canlı harita `v_student_live_status` tarafından oluşturulur; hassas akademik detayları gizler ve öğrencilere sadece gerekli oda keşfi bilgilerini sağlar.",
+        "pill_live_availability": "Canlı kullanılabilirlik",
+        "pill_heatmap": "Doluluk haritası",
+        "pill_smart_filter": "Akıllı ekipman filtresi",
+        "quick_filter": "Hızlı Filtre",
+        "visible_rooms": "mevcut filtrelerden sonra görünen odalar",
+        "rooms_ready": "şu anda sakin veya kullanıma hazır odalar",
+        "approved_requests": "bu öğrenci için onaylanmış istekler",
+        "block_label": "Blok",
+        "floor": "Kat",
+        "seats": "Koltuk",
+        "all_blocks": "Tüm bloklar",
+        "minimum_power_outlets": "Minimum priz sayısı",
+        "no_preference": "Tercih yok",
+        "projector_label": "Projeksiyon",
+        "smart_board_label": "Akıllı tahta",
+        "any": "Herhangi",
+        "required": "Zorunlu",
+        "apply_filters": "Filtreleri Uygula",
+        "reset_filters": "Filtreleri Temizle",
+        "live_room_heatmap": "Canlı Oda Haritası",
+        "no_rooms_match": "Mevcut filtreye uygun oda yok.",
+        "try_removing_constraints": "Bir veya daha fazla kısıtı kaldırmayı deneyin.",
+        "create_reservation_request": "Rezervasyon Talebi Oluştur",
+        "request_note_hint": "Projeksiyon ve 20+ priz gerekiyor",
+        "submit_request": "Talebi Gönder",
+        "my_requests": "Taleplerim",
+        "title": "Başlık",
+        "type": "Tür",
+        "room": "Oda",
+        "start": "Başlangıç",
+        "status": "Durum",
+        "no_requests_yet": "Bu öğrenci tarafından henüz rezervasyon talebi oluşturulmadı.",
+        "end": "Bitiş",
+        "event_type_workshop": "Atölye",
+        "event_type_club": "Kulüp",
+        "event_type_makeup": "Mazaret Sınavı",
+        "date_format": "gg.aa.yyyy",
+        "event_type_exam": "Sınav",
+        "event_type_seminar": "Seminer",
+        "academic_dashboard": "Akademik Panel",
+        "welcome_back_dr": "Tekrar hoş geldin, Dr. {name}",
+        "academic_description": "Akademik panel, planlama kararlarının veri tabanlı ve güvenli kalması için `Academic_Schedules`, `Event_Requests` ve `v_exam_coordination` kaynaklarını birleştirir.",
+        "schedule_optimizer": "Program optimize edici",
+        "conflict_detection": "Çakışma tespiti",
+        "approval_workflow": "Onay süreci",
+        "conflict_logic_summary": "Çakışma Mantığı Özeti",
+        "conflict_summary_text": "Aynı oda için `new.start_at < existing.end_at` ve `new.end_at > existing.start_at` olduğunda rezervasyon reddedilir. Bu kural veritabanı tetikleyicileriyle uygulanır.",
+        "pending_requests_waiting": "Akademik inceleme bekleyen talepler",
+        "exam_coordination_records": "Analitik görünümdeki sınav koordinasyon kayıtları",
+        "active_overlaps": "çakışma beslemesinde gösterilen aktif çakışmalar",
+        "my_schedule": "Programım",
+        "exam_coordination": "Sınav Koordinasyonu",
+        "pending_requests_title": "Bekleyen Talepler",
+        "requester": "Talep Eden",
+        "decision": "Karar",
+        "approve": "Onayla",
+        "reject": "Reddet",
+        "no_pending_requests": "Şu anda bekleyen talep yok.",
+        "conflict_detection_feed": "Çakışma Tespit Beslemesi",
+        "current_state": "Mevcut durum",
+        "no_active_conflict": "Bekleyen veya onaylanmış taleplerde aktif çakışma tespit edilmedi.",
+        "clear": "Temiz",
+        "request_submitted_success": "Talep başarıyla gönderildi",
+        "only_students_submit": "Sadece öğrenciler talep gönderebilir",
+        "only_academics_review": "Sadece akademik kullanıcılar talepleri inceleyebilir",
+        "unsupported_decision": "Desteklenmeyen karar",
+        "request_approved_success": "Talep başarıyla onaylandı",
+        "request_rejected_success": "Talep başarıyla reddedildi",
+        "all_fields_required": "Tüm alanlar zorunludur",
+        "invalid_email": "Geçersiz e-posta adresi",
+        "passwords_do_not_match": "Parolalar eşleşmiyor",
+        "account_created": "Hesap başarıyla oluşturuldu. Lütfen giriş yapın.",
+        "email_exists": "E-posta zaten mevcut",
+        "yes": "Evet",
+        "no": "Hayır",
+    },
+}
+
+
+def t(key: str, lang: str) -> str:
+    return TRANSLATIONS.get(lang, TRANSLATIONS[DEFAULT_LANGUAGE]).get(key, TRANSLATIONS[DEFAULT_LANGUAGE].get(key, key))
+
+
+def translate_status(status: str, lang: str) -> str:
+    status_map = {
+        "Pending": {"en": "Pending", "tr": "Beklemede"},
+        "Approved": {"en": "Approved", "tr": "Onaylandı"},
+        "Rejected": {"en": "Rejected", "tr": "Reddedildi"},
+        "Available": {"en": "Available", "tr": "Mevcut"},
+    "Reserved": {"en": "Reserved", "tr": "Rezerve"},
+    "Occupied": {"en": "Occupied", "tr": "Dolu"},
+    "Maintenance": {"en": "Maintenance", "tr": "Bakım"},
+    "maintenance": {"en": "Maintenance", "tr": "Bakım"},
+        "Unknown": {"en": "Unknown", "tr": "Bilinmiyor"},
+    }
+    return status_map.get(status, {"en": status, "tr": status}).get(lang, status)
+
+
+def yes_no(value: bool, lang: str) -> str:
+    return t("yes", lang) if value else t("no", lang)
+
+
+def build_language_cookie(lang: str) -> cookies.SimpleCookie:
+    cookie = cookies.SimpleCookie()
+    cookie[LANG_COOKIE] = lang
+    cookie[LANG_COOKIE]["path"] = "/"
+    return cookie
+
+
+def get_language(handler: BaseHTTPRequestHandler, params: dict[str, list[str]]) -> str | None:
+    requested = params.get("lang", [""])[0].lower()
+    if requested in SUPPORTED_LANGUAGES:
+        return requested
+    cookie_header = handler.headers.get("Cookie")
+    if cookie_header:
+        jar = cookies.SimpleCookie()
+        jar.load(cookie_header)
+        lang_cookie = jar.get(LANG_COOKIE)
+        if lang_cookie and lang_cookie.value in SUPPORTED_LANGUAGES:
+            return lang_cookie.value
+    return None
+
+
+def translate_event_type(event_type: str | None, lang: str) -> str:
+    if not event_type:
+        return ""
+    key = f"event_type_{event_type.strip().lower()}"
+    # fallback to raw value when translation key missing
+    return TRANSLATIONS.get(lang, TRANSLATIONS[DEFAULT_LANGUAGE]).get(key, event_type)
 
 
 def logo_svg() -> str:
@@ -109,6 +392,23 @@ def style_block() -> str:
           linear-gradient(180deg, #faf6ee 0%, #efe4d1 100%);
       }
       a { color: inherit; text-decoration: none; }
+      .locale-toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        justify-content: flex-end;
+      }
+      .locale-toggle a {
+        color: var(--ink);
+        opacity: 0.7;
+      }
+      .locale-toggle a.active {
+        opacity: 1;
+        font-weight: 700;
+      }
+      .locale-toggle span {
+        color: var(--muted);
+      }
       .app-shell {
         width: min(1240px, calc(100% - 32px));
         margin: 24px auto 40px;
@@ -367,26 +667,34 @@ def style_block() -> str:
     """
 
 
-def render_layout(title: str, content: str, user: sqlite3.Row | None = None) -> str:
+def render_layout(title: str, content: str, user: sqlite3.Row | None = None, lang: str = DEFAULT_LANGUAGE) -> str:
     home_link = "/dashboard" if user is not None else "/"
     user_html = ""
     if user is not None:
         user_html = f"""
         <div class="toolbar">
           <div>
-            <div class="small muted">Signed in as</div>
-            <strong>{h(user["name"])}</strong>
-            <div class="small muted">{h(user["role"])} • {h(user["email"])}</div>
-            <div class="small muted">Click the logo anytime to return to your home screen.</div>
+            <div class="small muted">{h(t('signed_in_as', lang))}</div>
+            <strong>{h(user['name'])}</strong>
+            <div class="small muted">{h(user['role'])} • {h(user['email'])}</div>
+            <div class="small muted">{h(t('logo_click_hint', lang))}</div>
           </div>
           <form method="post" action="/logout" class="inline-form">
-            <button class="button-secondary" type="submit">Sign out</button>
+            <button class="button-secondary" type="submit">{h(t('sign_out', lang))}</button>
           </form>
         </div>
         """
 
+    locale_links = f"""
+      <div class="locale-toggle">
+        <a href="?lang=en" class="{'active' if lang == 'en' else ''}">EN</a>
+        <span>|</span>
+        <a href="?lang=tr" class="{'active' if lang == 'tr' else ''}">TR</a>
+      </div>
+    """
+
     return f"""<!DOCTYPE html>
-<html lang="en">
+<html lang="{h(lang)}">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -396,15 +704,16 @@ def render_layout(title: str, content: str, user: sqlite3.Row | None = None) -> 
   <body>
     <main class="app-shell">
       <section class="topbar">
-        <a class="brand-link" href="{home_link}" title="Return to home">
+        <a class="brand-link" href="{home_link}" title="{h(t('brand_title', lang))}">
           <div class="brand-mark">{logo_svg()}</div>
           <div class="brand-copy brand">
-            <div class="eyebrow">YTU Mathematical Engineering • Applied SQL</div>
-            <h1>KMF Smart Classroom & Event Management System</h1>
-            <div class="small muted">Yildiz-inspired classroom intelligence dashboard</div>
+            <div class="eyebrow">{h(t('brand_eyebrow', lang))}</div>
+            <h1>{h(t('brand_title', lang))}</h1>
+            <div class="small muted">{h(t('brand_subtitle', lang))}</div>
           </div>
         </a>
-        {user_html or '<div class="muted small">SQLite-backed demo application</div>'}
+        {user_html or f'<div class="muted small">{h(t("sqlite_note", lang))}</div>'}
+        {locale_links}
       </section>
       {content}
     </main>
@@ -453,7 +762,7 @@ def get_current_user(handler: BaseHTTPRequestHandler) -> sqlite3.Row | None:
         ).fetchone()
 
 
-def signin_page(message: str = "", error: bool = False) -> str:
+def signin_page(message: str = "", error: bool = False, lang: str = DEFAULT_LANGUAGE) -> str:
     flash = ""
     if message:
         flash_class = "error" if error else "success"
@@ -463,33 +772,32 @@ def signin_page(message: str = "", error: bool = False) -> str:
     <section class="hero">
       <div class="hero-grid">
         <div>
-          <div class="eyebrow">KMF Smart Classroom System</div>
-          <h2>Sign In to Your Account</h2>
+          <div class="eyebrow">{h(t('brand_eyebrow', lang))}</div>
+          <h2>{h(t('sign_in_title', lang))}</h2>
           <p class="muted">
-            Access the classroom management system for students and academics.
-            Sign in with your email and password.
+            {h(t('sign_in_description', lang))}
           </p>
           {flash}
           <div class="spaced">
-            <p class="small muted">Don't have an account? <a href="/signup">Sign up as a student</a></p>
+            <p class="small muted">{h(t('no_account', lang))} <a href="/signup">{h(t('sign_up_as_student', lang))}</a></p>
           </div>
         </div>
         <div class="card">
           <form method="post" action="/login">
-            <label for="email">Email</label>
+            <label for="email">{h(t('email', lang))}</label>
             <input type="email" id="email" name="email" required autofocus>
-            <label for="password">Password</label>
+            <label for="password">{h(t('password', lang))}</label>
             <input type="password" id="password" name="password" required>
-            <button class="button-accent" type="submit">Sign In</button>
+            <button class="button-accent" type="submit">{h(t('sign_in_button', lang))}</button>
           </form>
         </div>
       </div>
     </section>
     """
-    return render_layout("Sign In", content)
+    return render_layout(t('sign_in_title', lang), content, None, lang)
 
 
-def signup_page(message: str = "", error: bool = False) -> str:
+def signup_page(message: str = "", error: bool = False, lang: str = DEFAULT_LANGUAGE) -> str:
     with get_connection() as conn:
         departments = conn.execute(
             "SELECT department_id, department_name FROM Departments ORDER BY department_name"
@@ -509,42 +817,42 @@ def signup_page(message: str = "", error: bool = False) -> str:
     <section class="hero">
       <div class="hero-grid">
         <div>
-          <div class="eyebrow">KMF Smart Classroom System</div>
-          <h2>Create Your Student Account</h2>
+          <div class="eyebrow">{h(t('brand_eyebrow', lang))}</div>
+          <h2>{h(t('create_account_title', lang))}</h2>
           <p class="muted">
-            Join the classroom management system as a student.
-            Fill in your details to sign up.
+            {h(t('create_account_description', lang))}
           </p>
           {flash}
           <div class="spaced">
-            <p class="small muted">Already have an account? <a href="/signin">Sign in</a></p>
+            <p class="small muted">{h(t('already_account', lang))} <a href="/signin">{h(t('sign_in_link', lang))}</a></p>
           </div>
         </div>
         <div class="card">
           <form method="post" action="/register">
-            <label for="name">Full Name</label>
+            <label for="name">{h(t('full_name', lang))}</label>
             <input type="text" id="name" name="name" required>
-            <label for="email">Email</label>
+            <label for="email">{h(t('email', lang))}</label>
             <input type="email" id="email" name="email" required>
-            <label for="department">Department</label>
+            <label for="department">{h(t('department', lang))}</label>
             <select id="department" name="department_id" required>
-              <option value="">Select your department</option>
+              <option value="">{h(t('select_department', lang))}</option>
               {dept_options}
             </select>
-            <label for="password">Password</label>
+            <label for="password">{h(t('password', lang))}</label>
             <input type="password" id="password" name="password" required minlength="6">
-            <label for="confirm_password">Confirm Password</label>
+            <p class="small muted">{h(t('password_requirements', lang))}</p>
+            <label for="confirm_password">{h(t('confirm_password', lang))}</label>
             <input type="password" id="confirm_password" name="confirm_password" required>
-            <button class="button-accent" type="submit">Sign Up</button>
+            <button class="button-accent" type="submit">{h(t('sign_up_button', lang))}</button>
           </form>
         </div>
       </div>
     </section>
     """
-    return render_layout("Sign Up", content)
+    return render_layout(t('create_account_title', lang), content, None, lang)
 
 
-def student_dashboard(user: sqlite3.Row, params: dict[str, list[str]], message: str = "", error: bool = False) -> str:
+def student_dashboard(user: sqlite3.Row, params: dict[str, list[str]], message: str = "", error: bool = False, lang: str = DEFAULT_LANGUAGE) -> str:
     projector = sql_bool(params.get("projector", [""])[0])
     smart_board = sql_bool(params.get("smart_board", [""])[0])
     min_outlets = params.get("min_outlets", [""])[0]
@@ -607,7 +915,7 @@ def student_dashboard(user: sqlite3.Row, params: dict[str, list[str]], message: 
         ratio = occupancy_percentage(row)
         percent = round(ratio * 100)
         tag_class = room_badge(ratio)
-        status_text = row["live_status"] or "Unknown"
+        status_text = translate_status(row["live_status"] or "Unknown", lang)
         room_cards.append(
             f"""
             <div class="room-card {tag_class}">
@@ -615,12 +923,12 @@ def student_dashboard(user: sqlite3.Row, params: dict[str, list[str]], message: 
                 <strong>{h(row["room_code"])}</strong>
                 <span>{percent}% full</span>
               </div>
-              <div class="small">Block {h(row["block"])} • Floor {h(row["floor"])} • {h(row["capacity"])} seats</div>
+              <div class="small">{h(t('block_label', lang))} {h(row["block"])} • {h(t('floor', lang))} {h(row["floor"])} • {h(row["capacity"])} {h(t('seats', lang))}</div>
               <div class="room-tags">
-                <span>Status: {h(status_text)}</span>
-                <span>Projector: {"Yes" if row["projector"] else "No"}</span>
-                <span>Outlets: {h(row["power_outlets"])}</span>
-                <span>Smart board: {"Yes" if row["smart_board"] else "No"}</span>
+                <span>{h(t('status', lang))}: {h(status_text)}</span>
+                <span>{h(t('projector_label', lang))}: {h(yes_no(bool(row['projector']), lang))}</span>
+                <span>{h(t('minimum_power_outlets', lang))}: {h(row["power_outlets"])}</span>
+                <span>{h(t('smart_board_label', lang))}: {h(yes_no(bool(row['smart_board']), lang))}</span>
               </div>
             </div>
             """
@@ -628,21 +936,21 @@ def student_dashboard(user: sqlite3.Row, params: dict[str, list[str]], message: 
 
     if not room_cards:
         room_cards.append(
-            '<div class="card"><h3>No room matches the current filter.</h3><p class="muted">Try removing one or more constraints.</p></div>'
+            f'<div class="card"><h3>{h(t("no_rooms_match", lang))}</h3><p class="muted">{h(t("try_removing_constraints", lang))}</p></div>'
         )
 
     request_rows = "".join(
         f"""
         <tr>
           <td>{h(row["event_title"])}</td>
-          <td>{h(row["event_type"])}</td>
+          <td>{h(translate_event_type(row["event_type"], lang))}</td>
           <td>{h(row["room_code"])}</td>
           <td>{h(row["requested_start"])}</td>
-          <td><span class="badge {'ok' if row['status'] == 'Approved' else 'warn' if row['status'] == 'Pending' else 'danger'}">{h(row["status"])}</span></td>
+          <td><span class="badge {'ok' if row['status'] == 'Approved' else 'warn' if row['status'] == 'Pending' else 'danger'}">{h(translate_status(row['status'], lang))}</span></td>
         </tr>
         """
         for row in requests
-    ) or '<tr><td colspan="5" class="muted">No reservation request has been created by this student yet.</td></tr>'
+    ) or f'<tr><td colspan="5" class="muted">{h(t("no_requests_yet", lang))}</td></tr>'
 
     room_select = "".join(
         f'<option value="{h(room["room_id"])}">{h(room["room_code"])}</option>'
@@ -657,71 +965,71 @@ def student_dashboard(user: sqlite3.Row, params: dict[str, list[str]], message: 
     <section class="hero">
       <div class="hero-grid">
         <div>
-          <div class="eyebrow">Student Dashboard</div>
+          <div class="eyebrow">{h(t('student_dashboard', lang))}</div>
           <div class="welcome-line">
-            <h2>Welcome back, {h(user["name"].split()[0])}</h2>
-            <span class="badge info">{h(user["department_name"])}</span>
+            <h2>{h(t('welcome_back', lang).format(name=user['name'].split()[0]))}</h2>
+            <span class="badge info">{h(user['department_name'])}</span>
           </div>
           <p class="muted">
-            Find the right room in a few seconds. The interface stays tightly connected to SQLite, so filters, live room cards, and reservation history all reflect current database values.
+            {h(t('find_room_text', lang))}
           </p>
           <p class="muted">
-            The live map is powered by `v_student_live_status`, which hides sensitive academic details and exposes only what students need for room discovery.
+            {h(t('live_map_info', lang))}
           </p>
           <div class="pill-row">
-            <div class="pill">Live availability</div>
-            <div class="pill">Heatmap occupancy</div>
-            <div class="pill">Smart equipment filter</div>
+            <div class="pill">{h(t('pill_live_availability', lang))}</div>
+            <div class="pill">{h(t('pill_heatmap', lang))}</div>
+            <div class="pill">{h(t('pill_smart_filter', lang))}</div>
           </div>
           {flash}
         </div>
         <div class="card">
-          <h3>Quick Filter</h3>
+          <h3>{h(t('quick_filter', lang))}</h3>
           <div class="stats spaced">
             <div class="stat-box">
               <strong>{len(rooms)}</strong>
-              <div class="small muted">visible rooms after current filters</div>
+              <div class="small muted">{h(t('visible_rooms', lang))}</div>
             </div>
             <div class="stat-box">
               <strong>{available_now}</strong>
-              <div class="small muted">rooms currently calm or ready to use</div>
+              <div class="small muted">{h(t('rooms_ready', lang))}</div>
             </div>
             <div class="stat-box">
               <strong>{approved_count}</strong>
-              <div class="small muted">approved requests for this student</div>
+              <div class="small muted">{h(t('approved_requests', lang))}</div>
             </div>
           </div>
           <div class="spaced"></div>
           <form method="get" action="/dashboard">
-            <label>Block
+            <label>{h(t('block_label', lang))}
               <select name="block">
-                <option value="">All blocks</option>
+                <option value="">{h(t('all_blocks', lang))}</option>
                 {block_options}
               </select>
             </label>
-            <label>Minimum power outlets
+            <label>{h(t('minimum_power_outlets', lang))}
               <select name="min_outlets">
-                <option value="">No preference</option>
+                <option value="">{h(t('no_preference', lang))}</option>
                 <option value="10" {"selected" if min_outlets == "10" else ""}>10+</option>
                 <option value="20" {"selected" if min_outlets == "20" else ""}>20+</option>
                 <option value="40" {"selected" if min_outlets == "40" else ""}>40+</option>
               </select>
             </label>
-            <label>Projector
+            <label>{h(t('projector_label', lang))}
               <select name="projector">
-                <option value="">Any</option>
-                <option value="1" {"selected" if params.get("projector", [""])[0] == "1" else ""}>Required</option>
+                <option value="">{h(t('any', lang))}</option>
+                <option value="1" {"selected" if params.get("projector", [""])[0] == "1" else ""}>{h(t('required', lang))}</option>
               </select>
             </label>
-            <label>Smart board
+            <label>{h(t('smart_board_label', lang))}
               <select name="smart_board">
-                <option value="">Any</option>
-                <option value="1" {"selected" if params.get("smart_board", [""])[0] == "1" else ""}>Required</option>
+                <option value="">{h(t('any', lang))}</option>
+                <option value="1" {"selected" if params.get("smart_board", [""])[0] == "1" else ""}>{h(t('required', lang))}</option>
               </select>
             </label>
             <div class="grid-2">
-              <button class="button-accent" type="submit">Apply Filters</button>
-              <a class="button-link" href="/dashboard">Reset Filters</a>
+              <button class="button-accent" type="submit">{h(t('apply_filters', lang))}</button>
+              <a class="button-link" href="/dashboard">{h(t('reset_filters', lang))}</a>
             </div>
           </form>
         </div>
@@ -730,71 +1038,73 @@ def student_dashboard(user: sqlite3.Row, params: dict[str, list[str]], message: 
 
     <section class="grid-2 spaced">
       <article class="card">
-        <h3>Live Room Heatmap</h3>
+        <h3>{h(t('live_room_heatmap', lang))}</h3>
         <div class="heatmap">
           {"".join(room_cards)}
         </div>
       </article>
 
       <aside class="card">
-        <h3>Create Reservation Request</h3>
-        <p class="muted small">Students submit requests as `Pending`. Approval is controlled by academics and validated by database triggers, so frontend actions stay consistent with backend rules.</p>
+        <h3>{h(t('create_reservation_request', lang))}</h3>
+        <p class="muted small">{h(t('live_map_info', lang))}</p>
         <div class="pill-row">
-          <div class="pill">Pending: {pending_count}</div>
-          <div class="pill">Approved: {approved_count}</div>
+          <div class="pill">{h(t('pending_requests_title', lang))}: {pending_count}</div>
+          <div class="pill">{h(t('approved_requests', lang))}: {approved_count}</div>
         </div>
         <form method="post" action="/requests/new">
-          <label>Room
+          <label>{h(t('room', lang))}
             <select name="room_id" required>
               {room_select}
             </select>
           </label>
-          <label>Event title
+          <label>{h(t('title', lang))}
             <input type="text" name="event_title" required>
           </label>
-          <label>Event type
+          <label>{h(t('type', lang))}
             <select name="event_type" required>
-              <option value="Workshop">Workshop</option>
-              <option value="Club">Club</option>
-              <option value="Makeup">Makeup</option>
-              <option value="Exam">Exam</option>
-              <option value="Seminar">Seminar</option>
+              <option value="Workshop">{h(t('event_type_workshop', lang))}</option>
+              <option value="Club">{h(t('event_type_club', lang))}</option>
+              <option value="Makeup">{h(t('event_type_makeup', lang))}</option>
+              <option value="Exam">{h(t('event_type_exam', lang))}</option>
+              <option value="Seminar">{h(t('event_type_seminar', lang))}</option>
             </select>
           </label>
-          <label>Start time
+          <label>{h(t('start', lang))}
             <input type="datetime-local" name="requested_start" required>
+            <div class="muted small">{h(t('date_format', lang))}</div>
           </label>
-          <label>End time
+          <label>{h(t('end', lang))}
             <input type="datetime-local" name="requested_end" required>
+            <div class="muted small">{h(t('date_format', lang))}</div>
           </label>
-          <label>Request note
-            <textarea name="request_note" placeholder="Need projector and 20+ power outlets"></textarea>
+          <label>{h(t('request_note_hint', lang))}
+            <textarea name="request_note" placeholder="{h(t('request_note_hint', lang))}"></textarea>
           </label>
-          <button type="submit">Submit Request</button>
+          <button type="submit">{h(t('submit_request', lang))}</button>
         </form>
       </aside>
     </section>
 
     <section class="card spaced">
-      <h3>My Requests</h3>
+      <h3>{h(t('my_requests', lang))}</h3>
       <table class="table-lite">
         <thead>
           <tr>
-            <th>Title</th>
-            <th>Type</th>
-            <th>Room</th>
-            <th>Start</th>
-            <th>Status</th>
+            <th>{h(t('title', lang))}</th>
+            <th>{h(t('type', lang))}</th>
+            <th>{h(t('room', lang))}</th>
+            <th>{h(t('start', lang))}</th>
+            <th>{h(t('status', lang))}</th>
           </tr>
         </thead>
         <tbody>{request_rows}</tbody>
       </table>
     </section>
     """
-    return render_layout("Student Dashboard", content, user)
+    return render_layout(t('student_dashboard', lang), content, user, lang)
 
 
-def academic_dashboard(user: sqlite3.Row, message: str = "", error: bool = False) -> str:
+def academic_dashboard(user: sqlite3.Row, message: str = "", error: bool = False, lang: str = DEFAULT_LANGUAGE) -> str:
     with get_connection() as conn:
         my_schedule = conn.execute(
             """
@@ -914,30 +1224,30 @@ def academic_dashboard(user: sqlite3.Row, message: str = "", error: bool = False
     <section class="hero">
       <div class="hero-grid">
         <div>
-          <div class="eyebrow">Academic Dashboard</div>
+          <div class="eyebrow">{h(t('academic_dashboard', lang))}</div>
           <div class="welcome-line">
-            <h2>Welcome back, Dr. {h(user["name"].split()[0])}</h2>
-            <span class="badge info">{h(user["department_name"])}</span>
+            <h2>{h(t('welcome_back_dr', lang).format(name=user['name'].split()[0]))}</h2>
+            <span class="badge info">{h(user['department_name'])}</span>
           </div>
           <p class="muted">
-            The academic dashboard combines `Academic_Schedules`, `Event_Requests`, and `v_exam_coordination` so planning decisions remain data-driven and safe.
+            {h(t('academic_description', lang))}
           </p>
           <div class="pill-row">
-            <div class="pill">Schedule optimizer</div>
-            <div class="pill">Conflict detection</div>
-            <div class="pill">Approval workflow</div>
+            <div class="pill">{h(t('schedule_optimizer', lang))}</div>
+            <div class="pill">{h(t('conflict_detection', lang))}</div>
+            <div class="pill">{h(t('approval_workflow', lang))}</div>
           </div>
           {flash}
         </div>
         <div class="card">
-          <h3>Conflict Logic Summary</h3>
+          <h3>{h(t('conflict_logic_summary', lang))}</h3>
           <p class="muted small">
-            A booking is rejected when `new.start_at < existing.end_at` and `new.end_at > existing.start_at` for the same room. This rule is enforced at database level through triggers.
+            {h(t('conflict_summary_text', lang))}
           </p>
           <div class="stats">
-            <div class="stat-box"><strong>{len(pending)}</strong><div class="small muted">Pending requests waiting for academic review</div></div>
-            <div class="stat-box"><strong>{len(coordination)}</strong><div class="small muted">Exam coordination records in analytical view</div></div>
-            <div class="stat-box"><strong>{len(conflict_rows)}</strong><div class="small muted">active overlaps shown in conflict feed</div></div>
+            <div class="stat-box"><strong>{len(pending)}</strong><div class="small muted">{h(t('pending_requests_waiting', lang))}</div></div>
+            <div class="stat-box"><strong>{len(coordination)}</strong><div class="small muted">{h(t('exam_coordination_records', lang))}</div></div>
+            <div class="stat-box"><strong>{len(conflict_rows)}</strong><div class="small muted">{h(t('active_overlaps', lang))}</div></div>
           </div>
         </div>
       </div>
@@ -945,41 +1255,41 @@ def academic_dashboard(user: sqlite3.Row, message: str = "", error: bool = False
 
     <section class="grid-2 spaced">
       <article class="card">
-        <h3>My Schedule</h3>
+        <h3>{h(t('my_schedule', lang))}</h3>
         <div class="stats">{schedule_rows}</div>
       </article>
       <article class="card">
-        <h3>Exam Coordination</h3>
+        <h3>{h(t('exam_coordination', lang))}</h3>
         <div class="stats">{coordination_rows}</div>
       </article>
     </section>
 
     <section class="grid-2 spaced">
       <article class="card">
-        <h3>Pending Requests</h3>
+        <h3>{h(t('pending_requests_title', lang))}</h3>
         <table class="table-lite">
           <thead>
             <tr>
-              <th>Title</th>
-              <th>Requester</th>
-              <th>Room</th>
-              <th>Start</th>
-              <th>End</th>
-              <th>Decision</th>
+              <th>{h(t('title', lang))}</th>
+              <th>{h(t('requester', lang))}</th>
+              <th>{h(t('room', lang))}</th>
+              <th>{h(t('start', lang))}</th>
+              <th>{h(t('end', lang))}</th>
+              <th>{h(t('decision', lang))}</th>
             </tr>
           </thead>
           <tbody>
-            {"".join(pending_rows) or '<tr><td colspan="6" class="muted">There is no pending request right now.</td></tr>'}
+            {"".join(pending_rows) or f'<tr><td colspan="6" class="muted">{h(t("no_pending_requests", lang))}</td></tr>'}
           </tbody>
         </table>
       </article>
       <aside class="card">
-        <h3>Conflict Detection Feed</h3>
+        <h3>{h(t('conflict_detection_feed', lang))}</h3>
         <div class="stats">{conflict_list}</div>
       </aside>
     </section>
     """
-    return render_layout("Academic Dashboard", content, user)
+    return render_layout(t('academic_dashboard', lang), content, user, lang)
 
 
 class KMFHandler(BaseHTTPRequestHandler):
@@ -987,217 +1297,241 @@ class KMFHandler(BaseHTTPRequestHandler):
         ensure_database()
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
+        lang = get_language(self, params) or DEFAULT_LANGUAGE
+        lang_cookie = None
+        if params.get("lang", [""])[0].lower() in SUPPORTED_LANGUAGES:
+            lang_cookie = build_language_cookie(lang)
+
         user = get_current_user(self)
 
         if parsed.path == "/":
             if user is not None:
-                self.redirect("/dashboard")
+                self.redirect("/dashboard", cookies_header=lang_cookie)
                 return
-            self.respond_html(signin_page(params.get("message", [""])[0], params.get("error", ["0"])[0] == "1"))
+            self.respond_html(signin_page(params.get("message", [""])[0], params.get("error", ["0"])[0] == "1", lang), cookies_header=lang_cookie)
             return
 
         if parsed.path == "/signin":
             if user is not None:
-                self.redirect("/dashboard")
+                self.redirect("/dashboard", cookies_header=lang_cookie)
                 return
-            self.respond_html(signin_page(params.get("message", [""])[0], params.get("error", ["0"])[0] == "1"))
+            self.respond_html(signin_page(params.get("message", [""])[0], params.get("error", ["0"])[0] == "1", lang), cookies_header=lang_cookie)
             return
 
         if parsed.path == "/signup":
             if user is not None:
-                self.redirect("/dashboard")
+                self.redirect("/dashboard", cookies_header=lang_cookie)
                 return
-            self.respond_html(signup_page(params.get("message", [""])[0], params.get("error", ["0"])[0] == "1"))
+            self.respond_html(signup_page(params.get("message", [""])[0], params.get("error", ["0"])[0] == "1", lang), cookies_header=lang_cookie)
             return
 
         if parsed.path == "/proto":
             proto_html = (BASE_DIR / "ui-prototype.html").read_text(encoding="utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            if lang_cookie is not None:
+                for morsel in lang_cookie.values():
+                    self.send_header("Set-Cookie", morsel.OutputString())
             self.end_headers()
             self.wfile.write(proto_html.encode("utf-8"))
             return
 
         if parsed.path == "/dashboard":
             if user is None:
-                self.redirect("/?message=Please+sign+in+first&error=1")
+                self.redirect("/?message=Please+sign+in+first&error=1", cookies_header=lang_cookie)
                 return
 
             message = params.get("message", [""])[0]
             error = params.get("error", ["0"])[0] == "1"
             if user["role"] == "Student":
-                self.respond_html(student_dashboard(user, params, message, error))
+                self.respond_html(student_dashboard(user, params, message, error, lang), cookies_header=lang_cookie)
                 return
-            self.respond_html(academic_dashboard(user, message, error))
+            self.respond_html(academic_dashboard(user, message, error, lang), cookies_header=lang_cookie)
             return
 
-        self.respond_html(render_layout("Not Found", '<section class="hero"><h2>Page not found</h2></section>'), status=404)
+        self.respond_html(render_layout("Not Found", '<section class="hero"><h2>Page not found</h2></section>', None, lang), status=404, cookies_header=lang_cookie)
 
     def do_POST(self) -> None:
-        ensure_database()
-        parsed = urlparse(self.path)
-        form = parse_post_data(self)
-        user = get_current_user(self)
+      ensure_database()
+      parsed = urlparse(self.path)
+      form = parse_post_data(self)
+      user = get_current_user(self)
+      # preserve language selection across POST redirects
+      params = parse_qs(parsed.query)
+      lang = get_language(self, params) or DEFAULT_LANGUAGE
+      lang_cookie = None
+      if params.get("lang", [""])[0].lower() in SUPPORTED_LANGUAGES:
+        lang_cookie = build_language_cookie(lang)
 
-        if parsed.path == "/login":
-            email = form.get("email", "").strip()
-            password = form.get("password", "").strip()
-            if not email or not password:
-                self.redirect("/signin?message=Email+and+password+are+required&error=1")
-                return
+      if parsed.path == "/login":
+        email = form.get("email", "").strip()
+        password = form.get("password", "").strip()
+        if not email or not password:
+          self.redirect("/signin?message=Email+and+password+are+required&error=1", cookies_header=lang_cookie)
+          return
 
-            password_hash = hashlib.sha256(password.encode()).hexdigest()
-            with get_connection() as conn:
-                db_user = conn.execute(
-                    """
-                    SELECT user_id, name, email, role
-                    FROM Users
-                    WHERE email = ? AND password_hash = ?
-                    """,
-                    (email, password_hash),
-                ).fetchone()
+        password_hash = hashlib.sha256(password.encode()).hexdigest()
+        with get_connection() as conn:
+          db_user = conn.execute(
+            """
+            SELECT user_id, name, email, role
+            FROM Users
+            WHERE email = ? AND password_hash = ?
+            """,
+            (email, password_hash),
+          ).fetchone()
 
-            if db_user is None:
-                self.redirect("/signin?message=Invalid+email+or+password&error=1")
-                return
+        if db_user is None:
+          self.redirect("/signin?message=Invalid+email+or+password&error=1", cookies_header=lang_cookie)
+          return
 
-            session_id = secrets.token_hex(16)
-            SESSIONS[session_id] = db_user["user_id"]
-            cookie = cookies.SimpleCookie()
-            cookie[SESSION_COOKIE] = session_id
-            cookie[SESSION_COOKIE]["path"] = "/"
+        session_id = secrets.token_hex(16)
+        SESSIONS[session_id] = db_user["user_id"]
+        cookie = cookies.SimpleCookie()
+        cookie[SESSION_COOKIE] = session_id
+        cookie[SESSION_COOKIE]["path"] = "/"
 
-            self.send_response(303)
-            self.send_header("Location", "/dashboard")
-            self.send_header("Set-Cookie", cookie.output(header="").strip())
-            self.end_headers()
-            return
+        self.send_response(303)
+        self.send_header("Location", "/dashboard")
+        self.send_header("Set-Cookie", cookie.output(header="").strip())
+        if lang_cookie is not None:
+          for morsel in lang_cookie.values():
+            self.send_header("Set-Cookie", morsel.OutputString())
+        self.end_headers()
+        return
 
-        if parsed.path == "/register":
-            name = form.get("name", "").strip()
-            email = form.get("email", "").strip()
-            department_id = form.get("department_id", "").strip()
-            password = form.get("password", "").strip()
-            confirm_password = form.get("confirm_password", "").strip()
+      if parsed.path == "/register":
+        name = form.get("name", "").strip()
+        email = form.get("email", "").strip()
+        department_id = form.get("department_id", "").strip()
+        password = form.get("password", "").strip()
+        confirm_password = form.get("confirm_password", "").strip()
 
-            if not all([name, email, department_id, password, confirm_password]):
-                self.redirect("/signup?message=All+fields+are+required&error=1")
-                return
-            if password != confirm_password:
-                self.redirect("/signup?message=Passwords+do+not+match&error=1")
-                return
-            if len(password) < 6:
-                self.redirect("/signup?message=Password+must+be+at+least+6+characters&error=1")
-                return
-            if "@" not in email:
-                self.redirect("/signup?message=Invalid+email+address&error=1")
-                return
+        if not all([name, email, department_id, password, confirm_password]):
+          self.redirect("/signup?message=All+fields+are+required&error=1", cookies_header=lang_cookie)
+          return
+        if password != confirm_password:
+          self.redirect("/signup?message=Passwords+do+not+match&error=1", cookies_header=lang_cookie)
+          return
+        policy_error = password_policy_error(password)
+        if policy_error is not None:
+          self.redirect(f"/signup?message={quote_plus(policy_error)}&error=1", cookies_header=lang_cookie)
+          return
+        if "@" not in email:
+          self.redirect("/signup?message=Invalid+email+address&error=1", cookies_header=lang_cookie)
+          return
 
-            password_hash = hashlib.sha256(password.encode()).hexdigest()
-            try:
-                with get_connection() as conn:
-                    conn.execute(
-                        """
-                        INSERT INTO Users (department_id, name, email, password_hash, role)
-                        VALUES (?, ?, ?, ?, 'Student')
-                        """,
-                        (int(department_id), name, email, password_hash),
-                    )
-                    conn.commit()
-                self.redirect("/signin?message=Account+created+successfully.+Please+sign+in.")
-            except sqlite3.IntegrityError:
-                self.redirect("/signup?message=Email+already+exists&error=1")
-            return
+        password_hash = hashlib.sha256(password.encode()).hexdigest()
+        try:
+          with get_connection() as conn:
+            conn.execute(
+              """
+              INSERT INTO Users (department_id, name, email, password_hash, role)
+              VALUES (?, ?, ?, ?, 'Student')
+              """,
+              (int(department_id), name, email, password_hash),
+            )
+            conn.commit()
+          self.redirect("/signin?message=Account+created+successfully.+Please+sign+in.", cookies_header=lang_cookie)
+        except sqlite3.IntegrityError:
+          self.redirect("/signup?message=Email+already+exists&error=1", cookies_header=lang_cookie)
+        return
 
-        if parsed.path == "/logout":
-            self.clear_session_and_redirect()
-            return
+      if parsed.path == "/logout":
+        self.clear_session_and_redirect()
+        return
 
-        if parsed.path == "/requests/new":
-            if user is None or user["role"] != "Student":
-                self.redirect("/?message=Only+students+can+submit+requests&error=1")
-                return
+      if parsed.path == "/requests/new":
+        if user is None or user["role"] != "Student":
+          self.redirect("/?message=Only+students+can+submit+requests&error=1", cookies_header=lang_cookie)
+          return
 
-            try:
-                with get_connection() as conn:
-                    conn.execute(
-                        """
-                        INSERT INTO Event_Requests (
-                            requester_id, room_id, event_title, event_type,
-                            requested_start, requested_end, request_note
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            user["user_id"],
-                            int(form["room_id"]),
-                            form["event_title"],
-                            form["event_type"],
-                            form["requested_start"].replace("T", " ") + ":00",
-                            form["requested_end"].replace("T", " ") + ":00",
-                            form.get("request_note", "").strip() or None,
-                        ),
-                    )
-                    conn.commit()
-                self.redirect("/dashboard?message=Request+submitted+successfully")
-            except (sqlite3.IntegrityError, sqlite3.OperationalError, KeyError, ValueError) as exc:
-                self.redirect(f"/dashboard?message={quote_plus(str(exc))}&error=1")
-            return
+        try:
+          with get_connection() as conn:
+            conn.execute(
+              """
+              INSERT INTO Event_Requests (
+                requester_id, room_id, event_title, event_type,
+                requested_start, requested_end, request_note
+              ) VALUES (?, ?, ?, ?, ?, ?, ?)
+              """,
+              (
+                user["user_id"],
+                int(form["room_id"]),
+                form["event_title"],
+                form["event_type"],
+                form["requested_start"].replace("T", " ") + ":00",
+                form["requested_end"].replace("T", " ") + ":00",
+                form.get("request_note", "").strip() or None,
+              ),
+            )
+            conn.commit()
+          self.redirect("/dashboard?message=Request+submitted+successfully", cookies_header=lang_cookie)
+        except (sqlite3.IntegrityError, sqlite3.OperationalError, KeyError, ValueError) as exc:
+          self.redirect(f"/dashboard?message={quote_plus(str(exc))}&error=1", cookies_header=lang_cookie)
+        return
 
-        if parsed.path == "/requests/review":
-            if user is None or user["role"] != "Academic":
-                self.redirect("/?message=Only+academic+users+can+review+requests&error=1")
-                return
+      if parsed.path == "/requests/review":
+        if user is None or user["role"] != "Academic":
+          self.redirect("/?message=Only+academic+users+can+review+requests&error=1", cookies_header=lang_cookie)
+          return
 
-            decision = form.get("decision", "")
-            if decision not in {"Approved", "Rejected"}:
-                self.redirect("/dashboard?message=Unsupported+decision&error=1")
-                return
+        decision = form.get("decision", "")
+        if decision not in {"Approved", "Rejected"}:
+          self.redirect("/dashboard?message=Unsupported+decision&error=1", cookies_header=lang_cookie)
+          return
 
-            try:
-                with get_connection() as conn:
-                    if decision == "Approved":
-                        conn.execute(
-                            """
-                            UPDATE Event_Requests
-                            SET status = 'Approved',
-                                approved_by = ?,
-                                decision_at = CURRENT_TIMESTAMP,
-                                rejection_reason = NULL
-                            WHERE request_id = ? AND status = 'Pending'
-                            """,
-                            (user["user_id"], int(form["request_id"])),
-                        )
-                    else:
-                        conn.execute(
-                            """
-                            UPDATE Event_Requests
-                            SET status = 'Rejected',
-                                approved_by = ?,
-                                decision_at = CURRENT_TIMESTAMP,
-                                rejection_reason = 'Rejected from academic dashboard'
-                            WHERE request_id = ? AND status = 'Pending'
-                            """,
-                            (user["user_id"], int(form["request_id"])),
-                        )
-                    conn.commit()
-                self.redirect(f"/dashboard?message=Request+{decision.lower()}+successfully")
-            except (sqlite3.IntegrityError, sqlite3.OperationalError, KeyError, ValueError) as exc:
-                self.redirect(f"/dashboard?message={quote_plus(str(exc))}&error=1")
-            return
+        try:
+          with get_connection() as conn:
+            if decision == "Approved":
+              conn.execute(
+                """
+                UPDATE Event_Requests
+                SET status = 'Approved',
+                  approved_by = ?,
+                  decision_at = CURRENT_TIMESTAMP,
+                  rejection_reason = NULL
+                WHERE request_id = ? AND status = 'Pending'
+                """,
+                (user["user_id"], int(form["request_id"])),
+              )
+            else:
+              conn.execute(
+                """
+                UPDATE Event_Requests
+                SET status = 'Rejected',
+                  approved_by = ?,
+                  decision_at = CURRENT_TIMESTAMP,
+                  rejection_reason = 'Rejected from academic dashboard'
+                WHERE request_id = ? AND status = 'Pending'
+                """,
+                (user["user_id"], int(form["request_id"])),
+              )
+            conn.commit()
+          self.redirect(f"/dashboard?message=Request+{decision.lower()}+successfully", cookies_header=lang_cookie)
+        except (sqlite3.IntegrityError, sqlite3.OperationalError, KeyError, ValueError) as exc:
+          self.redirect(f"/dashboard?message={quote_plus(str(exc))}&error=1", cookies_header=lang_cookie)
+        return
 
-        self.respond_html(render_layout("Not Found", '<section class="hero"><h2>Page not found</h2></section>'), status=404)
+      self.respond_html(render_layout("Not Found", '<section class="hero"><h2>Page not found</h2></section>'), status=404, cookies_header=lang_cookie)
 
-    def respond_html(self, body: str, status: int = 200) -> None:
+    def respond_html(self, body: str, status: int = 200, cookies_header: cookies.SimpleCookie | None = None) -> None:
         payload = body.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(payload)))
+        if cookies_header is not None:
+            for morsel in cookies_header.values():
+                self.send_header("Set-Cookie", morsel.OutputString())
         self.end_headers()
         self.wfile.write(payload)
 
-    def redirect(self, location: str) -> None:
+    def redirect(self, location: str, cookies_header: cookies.SimpleCookie | None = None) -> None:
         self.send_response(303)
         self.send_header("Location", location)
+        if cookies_header is not None:
+            for morsel in cookies_header.values():
+                self.send_header("Set-Cookie", morsel.OutputString())
         self.end_headers()
 
     def clear_session_and_redirect(self) -> None:
