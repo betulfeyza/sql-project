@@ -11,6 +11,31 @@ This repository contains an Applied SQL course project prepared for the Mathemat
 
 The main academic goal is not only to store data, but to show how SQL can actively control workflow, prevent invalid operations, support analytics, and feed a usable interface.
 
+## Latest Updates
+
+The latest project update focuses on making the pulled GitHub version work reliably on existing local machines and cleaning up the signed-in user experience.
+
+### Backend and Database
+
+- Added a local migration path for older `kmf.db` files that were created before password-based login was introduced.
+- If an existing database is missing `Users.password_hash`, the application now adds the column automatically at startup.
+- Existing seeded users are backfilled with the demo password hash for `Demo123!`, so teammates can still sign in without deleting their local database.
+- Added a unique email index for `Users.email` to keep registration behavior consistent with the schema.
+- Kept the existing request-history migration behavior so older databases can continue working with the newer request workflow.
+
+### Frontend and User Experience
+
+- Removed the helper text that said users could click the logo to return home, because it crowded the top bar.
+- Reworked the signed-in top bar so user details, language selection, theme controls, and sign-out are no longer spread across the header.
+- Added a compact profile/settings menu with user initials, the user name, and a settings icon.
+- The settings popover now contains account details, English/Turkish language selection, light/dark theme controls, and the sign-out action.
+- Added small interaction behavior so the settings popover closes when clicking outside it or pressing `Escape`.
+
+### Documentation
+
+- Updated the account, backend compatibility, frontend/database harmony, running, and UI test-flow sections to match the current application behavior.
+- Documented that older local SQLite databases are migrated automatically after pulling the latest code.
+
 ## Project Files
 
 - [setup.sql](./setup.sql)  
