@@ -2,11 +2,14 @@ PRAGMA foreign_keys = ON;
 
 BEGIN TRANSACTION;
 
+DROP VIEW IF EXISTS v_room_utilization_summary;
 DROP VIEW IF EXISTS v_exam_coordination;
 DROP VIEW IF EXISTS v_student_live_status;
 
 DROP TRIGGER IF EXISTS trg_event_requests_insert_guard;
 DROP TRIGGER IF EXISTS trg_event_requests_update_guard;
+DROP TRIGGER IF EXISTS trg_event_request_audit_insert;
+DROP TRIGGER IF EXISTS trg_event_request_audit_update;
 DROP TRIGGER IF EXISTS trg_usage_logs_time_guard;
 DROP TRIGGER IF EXISTS trg_schedule_conflict_guard_insert;
 DROP TRIGGER IF EXISTS trg_schedule_conflict_guard_update;
@@ -14,6 +17,7 @@ DROP TRIGGER IF EXISTS trg_event_request_conflict_guard_insert;
 DROP TRIGGER IF EXISTS trg_event_request_conflict_guard_update;
 
 DROP TABLE IF EXISTS Usage_Logs;
+DROP TABLE IF EXISTS Request_Audit_Log;
 DROP TABLE IF EXISTS Event_Requests;
 DROP TABLE IF EXISTS Academic_Schedules;
 DROP TABLE IF EXISTS Classrooms;
@@ -32,14 +36,16 @@ CREATE TABLE Users (
     user_id INTEGER PRIMARY KEY,
     department_id INTEGER NOT NULL,
     name TEXT NOT NULL,
-    email TEXT NOT NULL UNIQUE,
+    email TEXT NOT NULL COLLATE NOCASE UNIQUE,
     password_hash TEXT NOT NULL,
     role TEXT NOT NULL CHECK (role IN ('Student', 'Academic')),
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (department_id) REFERENCES Departments(department_id)
         ON UPDATE CASCADE
         ON DELETE RESTRICT,
-    CHECK (instr(email, '@') > 1)
+    CHECK (instr(email, '@') > 1),
+    CHECK (length(trim(name)) > 0),
+    CHECK (length(password_hash) >= 64)
 );
 
 CREATE TABLE Classrooms (
@@ -98,6 +104,7 @@ CREATE TABLE Event_Requests (
     decision_at TEXT,
     rejection_reason TEXT,
     request_note TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (requester_id) REFERENCES Users(user_id)
         ON UPDATE CASCADE
         ON DELETE RESTRICT,
@@ -115,6 +122,22 @@ CREATE TABLE Event_Requests (
         OR (status = 'Approved' AND approved_by IS NOT NULL AND decision_at IS NOT NULL)
         OR (status = 'Rejected' AND decision_at IS NOT NULL)
     )
+);
+
+CREATE TABLE Request_Audit_Log (
+    audit_id INTEGER PRIMARY KEY,
+    request_id INTEGER NOT NULL,
+    old_status TEXT,
+    new_status TEXT NOT NULL CHECK (new_status IN ('Pending', 'Approved', 'Rejected')),
+    changed_by INTEGER,
+    changed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    note TEXT,
+    FOREIGN KEY (request_id) REFERENCES Event_Requests(request_id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+    FOREIGN KEY (changed_by) REFERENCES Users(user_id)
+        ON UPDATE CASCADE
+        ON DELETE SET NULL
 );
 
 CREATE TABLE Usage_Logs (
@@ -166,6 +189,23 @@ BEGIN
                  )
             THEN RAISE(ABORT, 'Only Academic users can approve event requests.')
         END;
+END;
+
+CREATE TRIGGER trg_event_request_audit_insert
+AFTER INSERT ON Event_Requests
+FOR EACH ROW
+BEGIN
+    INSERT INTO Request_Audit_Log (request_id, old_status, new_status, changed_by, changed_at, note)
+    VALUES (NEW.request_id, NULL, NEW.status, NEW.requester_id, CURRENT_TIMESTAMP, 'Request created');
+END;
+
+CREATE TRIGGER trg_event_request_audit_update
+AFTER UPDATE OF status ON Event_Requests
+FOR EACH ROW
+WHEN OLD.status <> NEW.status
+BEGIN
+    INSERT INTO Request_Audit_Log (request_id, old_status, new_status, changed_by, changed_at, note)
+    VALUES (NEW.request_id, OLD.status, NEW.status, NEW.approved_by, COALESCE(NEW.decision_at, CURRENT_TIMESTAMP), COALESCE(NEW.rejection_reason, 'Status updated'));
 END;
 
 CREATE TRIGGER trg_usage_logs_time_guard
@@ -297,6 +337,12 @@ CREATE INDEX idx_schedules_room_time
 CREATE INDEX idx_event_requests_room_time
     ON Event_Requests (room_id, requested_start, requested_end);
 
+CREATE INDEX idx_users_role_department
+    ON Users (role, department_id);
+
+CREATE INDEX idx_request_audit_request_time
+    ON Request_Audit_Log (request_id, changed_at DESC);
+
 CREATE VIEW v_student_live_status AS
 SELECT
     c.room_id,
@@ -356,6 +402,34 @@ JOIN Departments d ON d.department_id = s.department_id
 JOIN Classrooms c ON c.room_id = s.room_id
 WHERE s.schedule_type = 'Exam';
 
+CREATE VIEW v_room_utilization_summary AS
+SELECT
+    c.room_id,
+    c.room_code,
+    c.block,
+    c.floor,
+    c.capacity,
+    COALESCE(ROUND(AVG(100.0 * ul.occupancy_count / c.capacity), 2), 0) AS average_occupancy_rate,
+    COUNT(ul.log_id) AS observation_count,
+    (
+        SELECT x.status
+        FROM Usage_Logs x
+        WHERE x.room_id = c.room_id
+        ORDER BY datetime(x.observed_at) DESC
+        LIMIT 1
+    ) AS latest_status,
+    (
+        SELECT x.observed_at
+        FROM Usage_Logs x
+        WHERE x.room_id = c.room_id
+        ORDER BY datetime(x.observed_at) DESC
+        LIMIT 1
+    ) AS last_observed_at
+FROM Classrooms c
+LEFT JOIN Usage_Logs ul ON ul.room_id = c.room_id
+WHERE c.is_active = 1
+GROUP BY c.room_id, c.room_code, c.block, c.floor, c.capacity;
+
 INSERT INTO Departments (department_id, department_name, department_code) VALUES
     (1, 'Mathematical Engineering', 'MATH'),
     (2, 'Chemical Engineering', 'CHEM'),
@@ -364,16 +438,16 @@ INSERT INTO Departments (department_id, department_name, department_code) VALUES
     (5, 'Bioengineering', 'BIOE');
 
 INSERT INTO Users (user_id, department_id, name, email, password_hash, role) VALUES
-    (1, 1, 'Ayse Demir', 'ayse.demir@ytu.edu.tr', 'ef61a579c907bbed674c0dbcbcf7f7af8f851538eef7b8e58c5bee0b8', 'Academic'),
-    (2, 2, 'Mehmet Kaya', 'mehmet.kaya@ytu.edu.tr', 'ef61a579c907bbed674c0dbcbcf7f7af8f851538eef7b8e58c5bee0b8', 'Academic'),
-    (3, 3, 'Selin Arslan', 'selin.arslan@ytu.edu.tr', 'ef61a579c907bbed674c0dbcbcf7f7af8f851538eef7b8e58c5bee0b8', 'Academic'),
-    (4, 4, 'Can Yilmaz', 'can.yilmaz@std.yildiz.edu.tr', 'ef61a579c907bbed674c0dbcbcf7f7af8f851538eef7b8e58c5bee0b8', 'Student'),
-    (5, 5, 'Zeynep Acar', 'zeynep.acar@std.yildiz.edu.tr', 'ef61a579c907bbed674c0dbcbcf7f7af8f851538eef7b8e58c5bee0b8', 'Student'),
-    (6, 1, 'Berk Gunes', 'berk.gunes@std.yildiz.edu.tr', 'ef61a579c907bbed674c0dbcbcf7f7af8f851538eef7b8e58c5bee0b8', 'Student'),
-    (7, 2, 'Elif Kurt', 'elif.kurt@ytu.edu.tr', 'ef61a579c907bbed674c0dbcbcf7f7af8f851538eef7b8e58c5bee0b8', 'Academic'),
-    (8, 3, 'Mert Sahin', 'mert.sahin@std.yildiz.edu.tr', 'ef61a579c907bbed674c0dbcbcf7f7af8f851538eef7b8e58c5bee0b8', 'Student'),
-    (9, 4, 'Deniz Ozturk', 'deniz.ozturk@std.yildiz.edu.tr', 'ef61a579c907bbed674c0dbcbcf7f7af8f851538eef7b8e58c5bee0b8', 'Student'),
-    (10, 5, 'Seda Inan', 'seda.inan@ytu.edu.tr', 'ef61a579c907bbed674c0dbcbcf7f7af8f851538eef7b8e58c5bee0b8', 'Academic');
+    (1, 1, 'Ayse Demir', 'ayse.demir@ytu.edu.tr', 'pbkdf2_sha256$180000$kmf-demo-user-01$bd5bc27f3c88fd4273d834c1d400046e7ab4c756a19b3cd568aa323083002e40', 'Academic'),
+    (2, 2, 'Mehmet Kaya', 'mehmet.kaya@ytu.edu.tr', 'pbkdf2_sha256$180000$kmf-demo-user-02$a5148561b16fc92989ba90ecc923e4eb90f24815f1033c4260778908fdadb0af', 'Academic'),
+    (3, 3, 'Selin Arslan', 'selin.arslan@ytu.edu.tr', 'pbkdf2_sha256$180000$kmf-demo-user-03$089f059b8b0173c286b6b073869baa77866fbc8ab82ce67b7846cb2ade870197', 'Academic'),
+    (4, 4, 'Can Yilmaz', 'can.yilmaz@std.yildiz.edu.tr', 'pbkdf2_sha256$180000$kmf-demo-user-04$9073fee265a6a6299ec803e65707a459606dfd91535482abe97c7237ef7b0613', 'Student'),
+    (5, 5, 'Zeynep Acar', 'zeynep.acar@std.yildiz.edu.tr', 'pbkdf2_sha256$180000$kmf-demo-user-05$f15cd579e44ee224977e8c651cd85d10d92167b615a5584ff948121eaad03c0e', 'Student'),
+    (6, 1, 'Berk Gunes', 'berk.gunes@std.yildiz.edu.tr', 'pbkdf2_sha256$180000$kmf-demo-user-06$8b3d492742e945cb62edf276d3416156a9544497b131588e0eb855824b657e84', 'Student'),
+    (7, 2, 'Elif Kurt', 'elif.kurt@ytu.edu.tr', 'pbkdf2_sha256$180000$kmf-demo-user-07$8b1fe1e9959d7ed2be1d95709fab6651783b7db060b3e41c1d8397e04b685b05', 'Academic'),
+    (8, 3, 'Mert Sahin', 'mert.sahin@std.yildiz.edu.tr', 'pbkdf2_sha256$180000$kmf-demo-user-08$b3232e2025e8ccc3c612a704466bbdc739f98facd47f4e8f59a3fafcf204d12e', 'Student'),
+    (9, 4, 'Deniz Ozturk', 'deniz.ozturk@std.yildiz.edu.tr', 'pbkdf2_sha256$180000$kmf-demo-user-09$bda0dbd8f8a8521f9ae0cff3b795ac4fc12baa60948b05c7bf606853d3aec13c', 'Student'),
+    (10, 5, 'Seda Inan', 'seda.inan@ytu.edu.tr', 'pbkdf2_sha256$180000$kmf-demo-user-10$40cd0880a10480bad5af2bb96c699326faac6e1723624699db1d18b548837ede', 'Academic');
 
 INSERT INTO Classrooms (room_id, room_code, block, floor, capacity, specs) VALUES
     (101, 'A-101', 'A', 1, 40, '{"projector":true,"power_outlets":24,"smart_board":true,"air_conditioning":true}'),
@@ -484,3 +558,19 @@ SELECT
     ) AS utilization_rank_in_block
 FROM weekly_usage
 ORDER BY block, utilization_rank_in_block, room_code;
+
+-- =====================================================
+-- ANALYTICAL QUERY 3: Request Audit Trail
+-- Rezervasyon taleplerinin durum geçmişini raporlar.
+-- =====================================================
+SELECT
+    er.event_title,
+    ral.old_status,
+    ral.new_status,
+    u.name AS changed_by_name,
+    ral.changed_at,
+    ral.note
+FROM Request_Audit_Log ral
+JOIN Event_Requests er ON er.request_id = ral.request_id
+LEFT JOIN Users u ON u.user_id = ral.changed_by
+ORDER BY datetime(ral.changed_at) DESC, ral.audit_id DESC;
