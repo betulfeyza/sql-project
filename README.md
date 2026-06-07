@@ -1,169 +1,64 @@
 # KMF Smart Classroom & Event Management System
 
-This repository contains an Applied SQL course project prepared for the Mathematical Engineering department at Yildiz Technical University. The project models a smart classroom and event coordination platform for the Chemical and Metallurgical Engineering Faculty and demonstrates how database design, SQL integrity rules, analytical queries, and a simple role-based interface can work together in one academic assignment.
+A standard-library Python + SQLite demo for the MTM4692 Applied SQL course. The project models a smart classroom and event coordination platform for the Chemical and Metallurgical Engineering Faculty (KMF), while keeping the original academic purpose: SQL is used for relational modeling, data integrity, workflow control, analytics, and a simple role-based interface.
 
-## Course Context
+## What was improved in this version
 
-- University: Yildiz Technical University
-- Department: Mathematical Engineering
-- Course: Applied SQL
-- Project Type: Database design and implementation assignment
+### Backend
 
-The main academic goal of the project is not only to store data, but to show how SQL can actively control workflow, prevent invalid operations, support analytics, and feed a usable interface.
+- Added stronger password handling with salted PBKDF2 hashes.
+- Kept backward compatibility for older SHA-256 demo hashes.
+- Added session expiration and safer cookies with `HttpOnly`, `SameSite=Lax`, and `max-age`.
+- Added safer form validation for registration, login, reservation creation, and request review.
+- Added active-room and active-department checks before writing new records.
+- Added `Request_Audit_Log` to record reservation workflow history.
+- Added `v_room_utilization_summary` for room-level occupancy analytics.
+- Added indexes for request audit lookup and user role/department filtering.
+- Improved database bootstrap logic so an older `kmf.db` is rebuilt when required objects are missing.
+
+### Frontend
+
+- Added visible demo credentials on the login page.
+- Improved student room cards with localized status labels.
+- Improved academic dashboard with a room utilization snapshot.
+- Expanded Turkish/English translations for newly visible UI labels.
+- Kept the original warm Yildiz-inspired visual style and role-based dashboard structure.
+
+### Documentation
+
+- Updated this README to match the current code and database behavior.
+- Added an updated PDF project summary: `SQL-PROJECT-UPDATED.pdf`.
+- Added `CHANGELOG.md` for a concise technical change record.
 
 ## Project Files
 
-- [setup.sql](./setup.sql)
-  Full SQLite setup script with schema, foreign keys, checks, triggers, indexes, views, seed data, recursive CTE, and window-function analytics.
-- [app.py](./app.py)
-  Python standard-library web application connected directly to the SQLite database.
-- [ui-prototype.html](./ui-prototype.html)
-  Earlier static concept draft kept as a visual presentation asset.
-- [.gitignore](./.gitignore)
-  Prevents local database files from being committed accidentally.
+- `setup.sql` - SQLite schema, triggers, views, indexes, seed data, and analytical SQL examples.
+- `app.py` - Python standard-library web application connected directly to SQLite.
+- `ui-prototype.html` - Static visual prototype kept as a presentation asset.
+- `SQL-PROJECT-UPDATED.pdf` - Updated project summary matching the revised schema and application.
+- `CHANGELOG.md` - Summary of implemented frontend, backend, SQL, and documentation changes.
+- `.gitignore` - Ignores generated local files such as `kmf.db`, caches, and virtual environments.
 
-## Problem Definition
+## Demo Credentials
 
-The system is designed for faculty-level classroom and event management. It supports:
+Use any seeded email with the shared demo password below.
 
-- classroom discovery for students
-- smart filtering by technical equipment
-- occupancy monitoring
-- lecture and exam planning
-- event request submission
-- academic approval workflow
-- conflict detection between schedules and requests
+```text
+Password: Demo123!
+```
 
-This creates a realistic scenario where SQL is used both as a data storage language and as a business-rule enforcement layer.
+Example users:
 
-## Database Design
+```text
+Student:    can.yilmaz@std.yildiz.edu.tr
+Academic:   ayse.demir@ytu.edu.tr
+```
 
-The schema is normalized around the following main entities:
-
-- `Departments`
-- `Users`
-- `Classrooms`
-- `Academic_Schedules`
-- `Event_Requests`
-- `Usage_Logs`
-
-The structure is designed according to 3NF:
-
-- each table represents a single subject
-- non-key fields depend on the whole key
-- transitive dependencies are avoided
-- master data and operational data are separated
-
-### Why the design is suitable for Applied SQL
-
-This project demonstrates several course-relevant SQL concepts in one coherent system:
-
-- normalized relational schema design
-- referential integrity with `FOREIGN KEY`
-- domain validation with `CHECK`
-- rule enforcement with `TRIGGER`
-- analytical reporting with `VIEW`
-- hierarchical reporting with recursive CTE
-- ranking and utilization analysis with window functions
-- query performance support with indexes
-
-## Business Rules Implemented in SQL
-
-The database enforces important system rules directly:
-
-- only valid departments, users, classrooms, schedules, requests, and logs can exist
-- occupancy count cannot exceed room capacity
-- academic schedules cannot overlap in the same room
-- pending or approved requests cannot conflict with existing academic schedules
-- approved requests cannot overlap with another approved request
-- only users with role `Academic` can approve a reservation request
-
-This means the database itself acts as a protection layer even if the application sends invalid data.
-
-## Analytical Layer
-
-Two important views are included:
-
-- `v_student_live_status`
-  Provides privacy-safe room visibility for students, including status, equipment, and occupancy information.
-- `v_exam_coordination`
-  Supports academic decision-making by combining exam records, room capacity, prior occupancy trend, and overlapping request counts.
-
-Advanced SQL features are also included:
-
-- recursive CTE for `Block > Floor > Room`
-- `DENSE_RANK()` ranking of weekly room utilization by block
-- indexes on room and timestamp related fields for faster access
-
-## UI and Application Layer
-
-The repository now includes a working web demo connected to the SQLite database.
-
-### Login Experience
-
-The application starts with a role-separated login screen:
-
-- Student Login
-- Academic Login
-
-For classroom-demo simplicity, login uses seeded users from the database and does not require passwords.
-
-### Student Dashboard
-
-The student experience is designed to be more user friendly and task-oriented:
-
-- live heatmap-like room cards
-- quick filter for block, projector, smart board, and outlet count
-- direct reservation request form
-- personal request history
-- a clickable Yildiz-inspired logo that returns the signed-in student to the main dashboard
-
-All room cards are read from `v_student_live_status`, so the UI stays aligned with privacy requirements.
-
-### Academic Dashboard
-
-The academic experience focuses on coordination and decision support:
-
-- personal teaching or exam schedule
-- exam coordination summary from `v_exam_coordination`
-- pending request approval table
-- conflict feed based on schedule and reservation overlap logic
-- the same logo-driven return-to-home behavior after login
-
-This interface demonstrates how SQL outputs can be turned into practical operational screens.
-
-### Frontend and Database Harmony
-
-The frontend is intentionally designed to stay in sync with the SQLite backend:
-
-- login options are read from seeded `Users` data
-- student room cards are read from `v_student_live_status`
-- request submission writes directly into `Event_Requests`
-- academic approval actions update the same table and immediately reflect SQL trigger rules
-- the top-left logo acts as a stable navigation anchor and always returns the active user to their own home screen
-
-## How Conflict Detection Works
-
-One of the key real-world problems in classroom management is exam and event collision.
-
-This project solves that problem at SQL level by comparing time intervals in the same room.
-
-For a new academic schedule, the trigger checks whether:
-
-`new.start_at < existing.end_at AND new.end_at > existing.start_at`
-
-If this condition is true for the same room, the new row is rejected.
-
-For event requests, the same logic is applied against:
-
-- `Academic_Schedules`
-- approved `Event_Requests`
-
-This guarantees that room conflicts are stopped before invalid data enters the system.
+Additional seeded users are defined in `setup.sql`.
 
 ## Running the Project
 
-### 1. Start the application
+The project has no external Python dependency. It uses only the Python standard library and SQLite.
 
 ```powershell
 python app.py
@@ -175,53 +70,100 @@ Then open:
 http://127.0.0.1:8000
 ```
 
-On first run, the application automatically creates `kmf.db` from `setup.sql` if the database file does not already exist.
+On first run, the application creates `kmf.db` from `setup.sql`. If an older database is present and does not contain the newer audit table or utilization view, the app rebuilds the demo database automatically.
 
-### 2. Optional direct SQLite usage
-
-If you want to initialize the database manually:
+## Optional Manual Database Initialization
 
 ```powershell
 sqlite3 kmf.db ".read 'setup.sql'"
 ```
 
-### 3. Sample analytics queries
+If the `sqlite3` command-line tool is not installed, simply run `python app.py`; the app initializes the database itself.
 
-Student-facing room view:
+## Database Design
 
-```sql
-SELECT * FROM v_student_live_status ORDER BY room_code;
-```
+The schema is normalized around operational and analytical entities:
 
-Exam coordination view:
+- `Departments`
+- `Users`
+- `Classrooms`
+- `Academic_Schedules`
+- `Event_Requests`
+- `Request_Audit_Log`
+- `Usage_Logs`
 
-```sql
-SELECT * FROM v_exam_coordination ORDER BY start_at;
-```
+The design follows 3NF principles: each table models one subject, non-key fields depend on the key, and operational data is separated from master data.
 
-## Example Demo Flow
+## SQL Rules and Integrity
 
-For presentation, the project can be demonstrated in this order:
+The database enforces important business rules directly:
 
-1. Show the login page and explain role-based entry.
-2. Enter as a student and filter rooms by equipment.
-3. Create a reservation request from the student panel.
-4. Sign in as an academic and approve or reject pending requests.
-5. Explain that approval and conflict logic are protected by SQL triggers.
+- valid user roles: `Student` or `Academic`
+- valid classroom equipment JSON in `Classrooms.specs`
+- valid schedule and request time ranges
+- occupancy count cannot exceed classroom capacity
+- academic schedules cannot overlap in the same room
+- pending or approved event requests cannot conflict with academic schedules
+- approved event requests cannot overlap with other approved requests
+- only academic users can approve requests
+- request status changes are written to `Request_Audit_Log`
 
-## Suggested Milestone Commit Messages
+This keeps the database as a protection layer even if the application sends invalid data.
 
-- `feat(init): bootstrap SQLite schema for KMF smart classroom management`
-- `feat(integrity): add foreign keys, checks, and conflict prevention triggers`
-- `feat(analytics): introduce reporting views, recursive hierarchy query, and usage ranking`
-- `feat(ui): add database-connected role-based demo interface`
+## Analytical SQL Layer
+
+The current version includes three views:
+
+### `v_student_live_status`
+
+Privacy-safe student-facing room status. It exposes room code, block, floor, capacity, equipment flags, latest status, latest occupancy, and last observation time.
+
+### `v_exam_coordination`
+
+Academic-facing exam coordination view. It joins schedules, academics, departments, classrooms, prior occupancy trend, and overlapping request counts.
+
+### `v_room_utilization_summary`
+
+Room-level usage summary for the academic dashboard. It reports average occupancy rate, observation count, latest status, and last observation time.
+
+The setup script also includes:
+
+- recursive CTE for `Block > Floor > Room` hierarchy
+- window-function ranking for weekly utilization by block
+- audit-trail query for request workflow history
+
+## Application Flow
+
+### Student
+
+1. Sign in with a seeded student account or register a new student account.
+2. Filter rooms by block, projector, smart board, and power outlet count.
+3. Submit a reservation request.
+4. Track personal requests and approval states.
+
+### Academic
+
+1. Sign in with a seeded academic account.
+2. Review personal schedule and exam coordination records.
+3. Inspect room utilization summary.
+4. Approve or reject pending reservation requests.
+5. Let SQL triggers block invalid approval attempts or conflicts.
+
+## Security Notes for the Demo
+
+This is still a course demo, not a production deployment. The current version improves the original implementation by using PBKDF2 password hashing, safer cookies, session expiration, and server-side validation. A production system would still need HTTPS, persistent server-side sessions, CSRF tokens, structured logging, rate limiting, and a full authentication/authorization framework.
+
+## Suggested Demo Flow
+
+1. Run `python app.py`.
+2. Open `http://127.0.0.1:8000`.
+3. Sign in as `can.yilmaz@std.yildiz.edu.tr` with `Demo123!`.
+4. Filter rooms from the student dashboard.
+5. Submit a non-conflicting request.
+6. Sign out and sign in as `ayse.demir@ytu.edu.tr` with `Demo123!`.
+7. Approve or reject the pending request.
+8. Explain how triggers, views, and audit logging keep the workflow consistent.
 
 ## Summary
 
-This project is a Mathematical Engineering Applied SQL assignment that connects theory and practice. It demonstrates that a well-designed SQLite database can support:
-
-- normalized relational modeling
-- strong integrity enforcement
-- analytical SQL reporting
-- secure approval logic
-- and a user-friendly interface built directly on top of database outputs
+The project now better connects the frontend, backend, and SQL layer without changing the original purpose. It remains an Applied SQL assignment focused on relational design, integrity rules, analytical SQL, and a practical role-based interface.
