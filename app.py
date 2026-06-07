@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import html
 import hashlib
+import hmac
 import json
+import re
 import secrets
 import string
 import sqlite3
+import time
 from datetime import datetime
 from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -19,8 +22,13 @@ SETUP_PATH = BASE_DIR / "setup.sql"
 HOST = "127.0.0.1"
 PORT = 8000
 SESSION_COOKIE = "kmf_session"
-SESSIONS: dict[str, int] = {}
-DEMO_PASSWORD_HASH = hashlib.sha256("Demo123!".encode()).hexdigest()
+SESSION_TTL_SECONDS = 8 * 60 * 60
+PASSWORD_ALGORITHM = "pbkdf2_sha256"
+PBKDF2_ITERATIONS = 180_000
+DEMO_PASSWORD = "Demo123!"
+LEGACY_DEMO_PASSWORD_HASH = hashlib.sha256(DEMO_PASSWORD.encode()).hexdigest()
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+SESSIONS: dict[str, dict[str, float | int]] = {}
 
 
 def event_requests_table_sql(table_name: str = "Event_Requests") -> str:
@@ -168,7 +176,26 @@ def migrate_database() -> None:
                 SET password_hash = ?
                 WHERE password_hash IS NULL OR password_hash = ''
                 """,
-                (DEMO_PASSWORD_HASH,),
+                (LEGACY_DEMO_PASSWORD_HASH,),
+            )
+        users_to_upgrade = conn.execute(
+            """
+            SELECT user_id
+            FROM Users
+            WHERE password_hash IS NULL
+               OR password_hash = ''
+               OR password_hash = ?
+            """,
+            (LEGACY_DEMO_PASSWORD_HASH,),
+        ).fetchall()
+        for row in users_to_upgrade:
+            conn.execute(
+                """
+                UPDATE Users
+                SET password_hash = ?
+                WHERE user_id = ?
+                """,
+                (demo_password_hash_for_user(row["user_id"]), row["user_id"]),
             )
         conn.execute(
             """
@@ -176,10 +203,57 @@ def migrate_database() -> None:
                 ON Users (email)
             """
         )
+        duplicate_email_rows = conn.execute(
+            """
+            SELECT LOWER(email)
+            FROM Users
+            GROUP BY LOWER(email)
+            HAVING COUNT(*) > 1
+            LIMIT 1
+            """
+        ).fetchone()
+        if duplicate_email_rows is None:
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_lower_unique
+                    ON Users (LOWER(email))
+                """
+            )
         conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_request_history_request_created
                 ON Request_History (request_id, created_at DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE VIEW IF NOT EXISTS v_room_utilization_summary AS
+            SELECT
+                c.room_id,
+                c.room_code,
+                c.block,
+                c.floor,
+                c.capacity,
+                COALESCE(ROUND(AVG(100.0 * ul.occupancy_count / c.capacity), 2), 0) AS average_occupancy_rate,
+                COUNT(ul.log_id) AS observation_count,
+                (
+                    SELECT x.status
+                    FROM Usage_Logs x
+                    WHERE x.room_id = c.room_id
+                    ORDER BY datetime(x.observed_at) DESC
+                    LIMIT 1
+                ) AS latest_status,
+                (
+                    SELECT x.observed_at
+                    FROM Usage_Logs x
+                    WHERE x.room_id = c.room_id
+                    ORDER BY datetime(x.observed_at) DESC
+                    LIMIT 1
+                ) AS last_observed_at
+            FROM Classrooms c
+            LEFT JOIN Usage_Logs ul ON ul.room_id = c.room_id
+            WHERE c.is_active = 1
+            GROUP BY c.room_id, c.room_code, c.block, c.floor, c.capacity
             """
         )
         history_count = conn.execute("SELECT COUNT(*) FROM Request_History").fetchone()[0]
@@ -252,6 +326,98 @@ def room_badge(percent: float) -> str:
 
 def h(value: object) -> str:
     return html.escape("" if value is None else str(value))
+
+
+def hash_password(password: str, salt: str | None = None) -> str:
+    salt = salt or secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt.encode("utf-8"),
+        PBKDF2_ITERATIONS,
+    ).hex()
+    return f"{PASSWORD_ALGORITHM}${PBKDF2_ITERATIONS}${salt}${digest}"
+
+
+def verify_password(password: str, stored_hash: str | None) -> bool:
+    if not stored_hash:
+        return False
+    if stored_hash.startswith(f"{PASSWORD_ALGORITHM}$"):
+        try:
+            algorithm, iterations, salt, digest = stored_hash.split("$", 3)
+            if algorithm != PASSWORD_ALGORITHM:
+                return False
+            candidate = hashlib.pbkdf2_hmac(
+                "sha256",
+                password.encode("utf-8"),
+                salt.encode("utf-8"),
+                int(iterations),
+            ).hex()
+            return hmac.compare_digest(candidate, digest)
+        except (TypeError, ValueError):
+            return False
+
+    legacy_hash = hashlib.sha256(password.encode()).hexdigest()
+    return hmac.compare_digest(legacy_hash, stored_hash)
+
+
+def should_upgrade_password_hash(stored_hash: str | None) -> bool:
+    return not stored_hash or not stored_hash.startswith(f"{PASSWORD_ALGORITHM}$")
+
+
+def demo_password_hash_for_user(user_id: int) -> str:
+    return hash_password(DEMO_PASSWORD, f"kmf-demo-user-{user_id:02d}")
+
+
+def is_valid_email(email: str) -> bool:
+    return bool(EMAIL_RE.match(email))
+
+
+def now_ts() -> float:
+    return time.time()
+
+
+def create_session(user_id: int) -> str:
+    session_id = secrets.token_urlsafe(32)
+    SESSIONS[session_id] = {
+        "user_id": user_id,
+        "expires_at": now_ts() + SESSION_TTL_SECONDS,
+    }
+    return session_id
+
+
+def get_session_user_id(handler: BaseHTTPRequestHandler) -> int | None:
+    cookie_header = handler.headers.get("Cookie")
+    if not cookie_header:
+        return None
+
+    jar = cookies.SimpleCookie()
+    jar.load(cookie_header)
+    session_cookie = jar.get(SESSION_COOKIE)
+    if session_cookie is None:
+        return None
+
+    session = SESSIONS.get(session_cookie.value)
+    if session is None:
+        return None
+
+    expires_at = float(session.get("expires_at", 0))
+    if expires_at < now_ts():
+        SESSIONS.pop(session_cookie.value, None)
+        return None
+
+    session["expires_at"] = now_ts() + SESSION_TTL_SECONDS
+    return int(session["user_id"])
+
+
+def build_session_cookie(session_id: str) -> cookies.SimpleCookie:
+    cookie = cookies.SimpleCookie()
+    cookie[SESSION_COOKIE] = session_id
+    cookie[SESSION_COOKIE]["path"] = "/"
+    cookie[SESSION_COOKIE]["httponly"] = True
+    cookie[SESSION_COOKIE]["samesite"] = "Lax"
+    cookie[SESSION_COOKIE]["max-age"] = str(SESSION_TTL_SECONDS)
+    return cookie
 
 
 def user_initials(name: str) -> str:
@@ -441,6 +607,10 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "no_exam_records": "No exam records are available.",
         "occupancy_trend": "Occupancy trend",
         "overlapping_requests": "Overlapping requests",
+        "room_utilization_snapshot": "Room Utilization Snapshot",
+        "average_occupancy": "Average occupancy",
+        "observations": "observations",
+        "last_seen": "Last seen",
         "overlaps_with": "{room} overlaps with {schedule}",
         "request_submitted_success": "Request submitted successfully",
         "request_updated_success": "Request updated successfully",
@@ -627,6 +797,10 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "no_exam_records": "Sınav kaydı bulunmuyor.",
         "occupancy_trend": "Doluluk eğilimi",
         "overlapping_requests": "Çakışan talepler",
+        "room_utilization_snapshot": "Oda Kullanım Özeti",
+        "average_occupancy": "Ortalama doluluk",
+        "observations": "gözlem",
+        "last_seen": "Son görülme",
         "overlaps_with": "{room}, {schedule} ile çakışıyor",
         "request_submitted_success": "Talep başarıyla gönderildi",
         "request_updated_success": "Talep başarıyla güncellendi",
@@ -697,6 +871,8 @@ def build_language_cookie(lang: str) -> cookies.SimpleCookie:
     cookie = cookies.SimpleCookie()
     cookie[LANG_COOKIE] = lang
     cookie[LANG_COOKIE]["path"] = "/"
+    cookie[LANG_COOKIE]["samesite"] = "Lax"
+    cookie[LANG_COOKIE]["max-age"] = str(30 * 24 * 60 * 60)
     return cookie
 
 
@@ -2652,18 +2828,8 @@ def parse_post_data(handler: BaseHTTPRequestHandler) -> dict[str, str]:
 
 
 def get_current_user(handler: BaseHTTPRequestHandler) -> sqlite3.Row | None:
-    cookie_header = handler.headers.get("Cookie")
-    if not cookie_header:
-        return None
-
-    jar = cookies.SimpleCookie()
-    jar.load(cookie_header)
-    session_cookie = jar.get(SESSION_COOKIE)
-    if session_cookie is None:
-        return None
-
-    user_id = SESSIONS.get(session_cookie.value)
-    if not user_id:
+    user_id = get_session_user_id(handler)
+    if user_id is None:
         return None
 
     with get_connection() as conn:
@@ -3305,6 +3471,14 @@ def academic_dashboard(user: sqlite3.Row, message: str = "", error: bool = False
             LIMIT 12
             """
         ).fetchall()
+        utilization = conn.execute(
+            """
+            SELECT room_code, average_occupancy_rate, observation_count, latest_status, last_observed_at
+            FROM v_room_utilization_summary
+            ORDER BY average_occupancy_rate DESC, room_code
+            LIMIT 6
+            """
+        ).fetchall()
         pending_alternatives = {
             row["request_id"]: find_alternative_rooms(
                 conn,
@@ -3395,6 +3569,20 @@ def academic_dashboard(user: sqlite3.Row, message: str = "", error: bool = False
         for row in conflict_rows
     ) or f'<div class="list-row"><div><strong>{h(t("current_state", lang))}</strong><div class="small muted">{h(t("no_active_conflict", lang))}</div></div><span class="badge ok">{h(t("clear", lang))}</span></div>'
 
+    utilization_rows = "".join(
+        f"""
+        <div class="stat-box">
+          <div class="stat-row">
+            <strong>{h(row["room_code"])}</strong>
+            <span class="badge info">{h(translate_status(row["latest_status"] or "Unknown", lang))}</span>
+          </div>
+          <div class="small muted">{h(t('average_occupancy', lang))}: {h(row["average_occupancy_rate"])}% â€¢ {h(row["observation_count"])} {h(t('observations', lang))}</div>
+          <div class="small muted">{h(t('last_seen', lang))}: {h(format_datetime(row["last_observed_at"], lang)) if row["last_observed_at"] else '-'}</div>
+        </div>
+        """
+        for row in utilization
+    )
+
     history_rows = "".join(
         f"""
         <div class="history-entry">
@@ -3451,6 +3639,11 @@ def academic_dashboard(user: sqlite3.Row, message: str = "", error: bool = False
         <h3>{h(t('exam_coordination', lang))}</h3>
         <div class="stats">{coordination_rows}</div>
       </article>
+    </section>
+
+    <section class="card spaced">
+      <h3>{h(t('room_utilization_snapshot', lang))}</h3>
+      <div class="grid-3">{utilization_rows}</div>
     </section>
 
     <section class="grid-2 spaced">
@@ -3562,36 +3755,46 @@ class KMFHandler(BaseHTTPRequestHandler):
         lang_cookie = build_language_cookie(lang)
 
       if parsed.path == "/login":
-        email = form.get("email", "").strip()
-        password = form.get("password", "").strip()
+        email = form.get("email", "").strip().lower()
+        password = form.get("password", "")
         if not email or not password:
           self.redirect("/signin?message=Email+and+password+are+required&error=1", cookies_header=lang_cookie)
           return
 
-        password_hash = hashlib.sha256(password.encode()).hexdigest()
         with get_connection() as conn:
           db_user = conn.execute(
             """
-            SELECT user_id, name, email, role
+            SELECT user_id, name, email, role, password_hash
             FROM Users
-            WHERE email = ? AND password_hash = ?
+            WHERE LOWER(email) = ?
             """,
-            (email, password_hash),
+            (email,),
           ).fetchone()
+          if db_user is not None and verify_password(password, db_user["password_hash"]):
+            if should_upgrade_password_hash(db_user["password_hash"]):
+              conn.execute(
+                """
+                UPDATE Users
+                SET password_hash = ?
+                WHERE user_id = ?
+                """,
+                (hash_password(password), db_user["user_id"]),
+              )
+              conn.commit()
+          else:
+            db_user = None
 
         if db_user is None:
           self.redirect("/signin?message=Invalid+email+or+password&error=1", cookies_header=lang_cookie)
           return
 
-        session_id = secrets.token_hex(16)
-        SESSIONS[session_id] = db_user["user_id"]
-        cookie = cookies.SimpleCookie()
-        cookie[SESSION_COOKIE] = session_id
-        cookie[SESSION_COOKIE]["path"] = "/"
+        session_id = create_session(db_user["user_id"])
+        cookie = build_session_cookie(session_id)
 
         self.send_response(303)
         self.send_header("Location", "/dashboard")
-        self.send_header("Set-Cookie", cookie.output(header="").strip())
+        for morsel in cookie.values():
+          self.send_header("Set-Cookie", morsel.OutputString())
         if lang_cookie is not None:
           for morsel in lang_cookie.values():
             self.send_header("Set-Cookie", morsel.OutputString())
@@ -3600,10 +3803,10 @@ class KMFHandler(BaseHTTPRequestHandler):
 
       if parsed.path == "/register":
         name = form.get("name", "").strip()
-        email = form.get("email", "").strip()
+        email = form.get("email", "").strip().lower()
         department_id = form.get("department_id", "").strip()
-        password = form.get("password", "").strip()
-        confirm_password = form.get("confirm_password", "").strip()
+        password = form.get("password", "")
+        confirm_password = form.get("confirm_password", "")
 
         if not all([name, email, department_id, password, confirm_password]):
           self.redirect("/signup?message=All+fields+are+required&error=1", cookies_header=lang_cookie)
@@ -3615,22 +3818,43 @@ class KMFHandler(BaseHTTPRequestHandler):
         if policy_error is not None:
           self.redirect(f"/signup?message={quote_plus(policy_error)}&error=1", cookies_header=lang_cookie)
           return
-        if "@" not in email:
+        if not is_valid_email(email):
           self.redirect("/signup?message=Invalid+email+address&error=1", cookies_header=lang_cookie)
           return
 
-        password_hash = hashlib.sha256(password.encode()).hexdigest()
+        password_hash = hash_password(password)
         try:
+          department_int = int(department_id)
           with get_connection() as conn:
+            existing_email = conn.execute(
+              """
+              SELECT 1
+              FROM Users
+              WHERE LOWER(email) = ?
+              """,
+              (email,),
+            ).fetchone()
+            if existing_email is not None:
+              self.redirect("/signup?message=Email+already+exists&error=1", cookies_header=lang_cookie)
+              return
+            department_exists = conn.execute(
+              "SELECT 1 FROM Departments WHERE department_id = ? AND is_active = 1",
+              (department_int,),
+            ).fetchone()
+            if department_exists is None:
+              self.redirect("/signup?message=Invalid+department&error=1", cookies_header=lang_cookie)
+              return
             conn.execute(
               """
               INSERT INTO Users (department_id, name, email, password_hash, role)
               VALUES (?, ?, ?, ?, 'Student')
               """,
-              (int(department_id), name, email, password_hash),
+              (department_int, name, email, password_hash),
             )
             conn.commit()
           self.redirect("/signin?message=Account+created+successfully.+Please+sign+in.", cookies_header=lang_cookie)
+        except ValueError:
+          self.redirect("/signup?message=Invalid+department&error=1", cookies_header=lang_cookie)
         except sqlite3.IntegrityError:
           self.redirect("/signup?message=Email+already+exists&error=1", cookies_header=lang_cookie)
         return
@@ -3903,6 +4127,8 @@ class KMFHandler(BaseHTTPRequestHandler):
         cookie = cookies.SimpleCookie()
         cookie[SESSION_COOKIE] = ""
         cookie[SESSION_COOKIE]["path"] = "/"
+        cookie[SESSION_COOKIE]["httponly"] = True
+        cookie[SESSION_COOKIE]["samesite"] = "Lax"
         cookie[SESSION_COOKIE]["expires"] = "Thu, 01 Jan 1970 00:00:00 GMT"
         self.send_response(303)
         self.send_header("Location", "/")

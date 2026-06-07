@@ -13,14 +13,18 @@ The main academic goal is not only to store data, but to show how SQL can active
 
 ## Latest Updates
 
-The latest project update focuses on making the pulled GitHub version work reliably on existing local machines and cleaning up the signed-in user experience.
+The latest project update focuses on making the pulled GitHub version work reliably on existing local machines, selectively integrating teammate PR improvements, and cleaning up the signed-in user experience.
 
 ### Backend and Database
 
 - Added a local migration path for older `kmf.db` files that were created before password-based login was introduced.
 - If an existing database is missing `Users.password_hash`, the application now adds the column automatically at startup.
+- Password handling now uses salted PBKDF2 hashes for new accounts and fresh seed data.
+- Legacy SHA-256 demo hashes are still accepted and are upgraded to PBKDF2 after a successful sign-in.
 - Existing seeded users are backfilled with the demo password hash for `Demo123!`, so teammates can still sign in without deleting their local database.
-- Added a unique email index for `Users.email` to keep registration behavior consistent with the schema.
+- Session cookies now use `HttpOnly`, `SameSite=Lax`, `max-age`, and an in-memory expiration window.
+- Added case-insensitive email uniqueness support to keep registration behavior consistent with the schema.
+- Added `v_room_utilization_summary` for room-level occupancy analytics without replacing the existing request-history workflow.
 - Kept the existing request-history migration behavior so older databases can continue working with the newer request workflow.
 
 ### Frontend and User Experience
@@ -30,6 +34,7 @@ The latest project update focuses on making the pulled GitHub version work relia
 - Added a compact profile/settings menu with user initials, the user name, and a settings icon.
 - The settings popover now contains account details, English/Turkish language selection, light/dark theme controls, and the sign-out action.
 - Added small interaction behavior so the settings popover closes when clicking outside it or pressing `Escape`.
+- Added a room utilization snapshot to the academic dashboard using the new analytics view.
 
 ### Documentation
 
@@ -128,12 +133,14 @@ The database remains the final protection layer, while the application also give
 
 ## Analytical Layer
 
-Two important views are included:
+Three important views are included:
 
 - `v_student_live_status`  
   Provides privacy-safe room visibility for students, including status, equipment, and occupancy information.
 - `v_exam_coordination`  
   Supports academic decision-making by combining exam records, room capacity, prior occupancy trend, and overlapping request counts.
+- `v_room_utilization_summary`  
+  Provides room-level average occupancy, observation count, latest status, and last observation time for the academic dashboard.
 
 Advanced SQL features are also included:
 
@@ -192,7 +199,9 @@ That extra account is not required by `setup.sql`; it depends on the local datab
 
 ### Backend Compatibility
 
-The application includes a small local migration layer for existing `kmf.db` files. If a database was created before password-based login was added, startup adds the missing `Users.password_hash` column, fills seeded demo users with the `Demo123!` hash, creates the user email uniqueness index, and keeps the newer request-history fields in sync.
+The application includes a small local migration layer for existing `kmf.db` files. If a database was created before password-based login was added, startup adds the missing `Users.password_hash` column, fills seeded demo users with a PBKDF2-compatible `Demo123!` hash, creates case-insensitive email uniqueness support, adds the room utilization summary view, and keeps the newer request-history fields in sync.
+
+Older SHA-256 demo hashes remain valid during sign-in and are upgraded to PBKDF2 automatically after a successful login. Session cookies are issued with `HttpOnly`, `SameSite=Lax`, `max-age`, and an in-memory expiration window.
 
 This lets teammates pull the latest code and continue using an older local SQLite file without deleting their local demo data.
 
@@ -238,6 +247,7 @@ The frontend stays in sync with the SQLite backend:
 - academic approval actions update the same table and still rely on SQL trigger protection
 - the academic conflict feed uses the same recurring schedule overlap logic as the database trigger layer
 - the authenticated top bar keeps frontend controls compact by grouping profile information, language, theme, and logout inside one settings popover
+- the academic utilization snapshot is read from `v_room_utilization_summary`
 
 ## How Conflict Detection Works
 
@@ -340,7 +350,7 @@ For a presentation or manual test, use this flow:
 9. Use the red Delete button and test the delete confirmation prompt.
 10. Sign in as an academic and approve or reject a pending request.
 11. Check that rejection requires a note.
-12. Review request history and conflict feed behavior.
+12. Review the room utilization snapshot, request history, and conflict feed behavior.
 
 ## Suggested Milestone Commit Messages
 
