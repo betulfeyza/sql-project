@@ -20,6 +20,7 @@ HOST = "127.0.0.1"
 PORT = 8000
 SESSION_COOKIE = "kmf_session"
 SESSIONS: dict[str, int] = {}
+DEMO_PASSWORD_HASH = hashlib.sha256("Demo123!".encode()).hexdigest()
 
 
 def event_requests_table_sql(table_name: str = "Event_Requests") -> str:
@@ -155,6 +156,26 @@ def migrate_database() -> None:
                     conn.execute(view["sql"])
 
         conn.execute(REQUEST_HISTORY_SQL)
+        user_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(Users)").fetchall()
+        }
+        if "password_hash" not in user_columns:
+            conn.execute("ALTER TABLE Users ADD COLUMN password_hash TEXT")
+            conn.execute(
+                """
+                UPDATE Users
+                SET password_hash = ?
+                WHERE password_hash IS NULL OR password_hash = ''
+                """,
+                (DEMO_PASSWORD_HASH,),
+            )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_unique
+                ON Users (email)
+            """
+        )
         conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_request_history_request_created
@@ -233,6 +254,22 @@ def h(value: object) -> str:
     return html.escape("" if value is None else str(value))
 
 
+def user_initials(name: str) -> str:
+    parts = [part for part in name.split() if part]
+    if not parts:
+        return "U"
+    return "".join(part[0].upper() for part in parts[:2])
+
+
+def gear_icon_svg() -> str:
+    return """
+    <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"></path>
+      <path d="M19.4 15a1.8 1.8 0 0 0 .36 1.98l.05.05a2.15 2.15 0 1 1-3.04 3.04l-.05-.05A1.8 1.8 0 0 0 14.74 19a1.8 1.8 0 0 0-1.1 1.65V21a2.15 2.15 0 1 1-4.3 0v-.08A1.8 1.8 0 0 0 8.26 19a1.8 1.8 0 0 0-1.98.36l-.05.05a2.15 2.15 0 1 1-3.04-3.04l.05-.05A1.8 1.8 0 0 0 3.6 15a1.8 1.8 0 0 0-1.65-1.1H2a2.15 2.15 0 1 1 0-4.3h.08A1.8 1.8 0 0 0 3.6 8a1.8 1.8 0 0 0-.36-1.98l-.05-.05a2.15 2.15 0 1 1 3.04-3.04l.05.05A1.8 1.8 0 0 0 8.26 3.6 1.8 1.8 0 0 0 9.36 2V2a2.15 2.15 0 1 1 4.3 0v.08A1.8 1.8 0 0 0 14.74 3.6a1.8 1.8 0 0 0 1.98-.36l.05-.05a2.15 2.15 0 1 1 3.04 3.04l-.05.05A1.8 1.8 0 0 0 19.4 8c.19.52.7.94 1.65 1.1H21a2.15 2.15 0 1 1 0 4.3h-.08A1.8 1.8 0 0 0 19.4 15Z"></path>
+    </svg>
+    """
+
+
 def password_policy_error(password: str) -> str | None:
     if len(password) < 6:
         return "Password must be at least 6 characters"
@@ -261,6 +298,10 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "signed_in_as": "Signed in as",
         "sign_out": "Sign out",
         "sqlite_note": "SQLite-backed demo application",
+        "settings": "Settings",
+        "open_settings": "Open settings",
+        "account": "Account",
+        "language": "Language",
         "theme_label": "Theme",
         "theme_light": "Light",
         "theme_dark": "Dark",
@@ -443,6 +484,10 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "signed_in_as": "Giriş yapan",
         "sign_out": "Çıkış yap",
         "sqlite_note": "SQLite destekli demo uygulama",
+        "settings": "Ayarlar",
+        "open_settings": "Ayarları aç",
+        "account": "Hesap",
+        "language": "Dil",
         "theme_label": "Tema",
         "theme_light": "Açık",
         "theme_dark": "Koyu",
@@ -1070,6 +1115,121 @@ def style_block() -> str:
         align-content: flex-end;
         flex-wrap: wrap;
         gap: 8px;
+        position: relative;
+        margin-left: auto;
+      }
+      .settings-menu {
+        position: relative;
+      }
+      .settings-menu > summary {
+        list-style: none;
+      }
+      .settings-menu > summary::-webkit-details-marker {
+        display: none;
+      }
+      .settings-trigger {
+        min-width: 220px;
+        max-width: 300px;
+        display: grid;
+        grid-template-columns: 42px minmax(0, 1fr) 34px;
+        align-items: center;
+        gap: 10px;
+        padding: 9px 10px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: var(--surface-soft);
+        box-shadow: var(--card-shadow);
+        cursor: pointer;
+        transition: transform 160ms ease, box-shadow 160ms ease, background-color 160ms ease;
+      }
+      .settings-trigger:hover {
+        transform: translateY(-1px);
+        box-shadow: var(--shadow);
+      }
+      .profile-avatar {
+        width: 42px;
+        height: 42px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 50%;
+        color: #fff;
+        background: linear-gradient(140deg, var(--deep), var(--accent));
+        font-weight: 800;
+        letter-spacing: 0;
+        box-shadow: 0 8px 18px rgba(21, 35, 33, 0.16);
+      }
+      .profile-copy {
+        display: grid;
+        gap: 1px;
+        min-width: 0;
+      }
+      .profile-copy strong,
+      .profile-copy span {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .profile-gear {
+        width: 34px;
+        height: 34px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 50%;
+        color: var(--deep);
+        background: var(--link-bg);
+        box-shadow: inset 0 0 0 1px var(--line);
+      }
+      .profile-gear svg {
+        width: 18px;
+        height: 18px;
+        stroke: currentColor;
+      }
+      .settings-trigger strong,
+      .settings-user strong,
+      .settings-user span {
+        overflow-wrap: anywhere;
+      }
+      .settings-popover {
+        position: absolute;
+        top: calc(100% + 10px);
+        right: 0;
+        z-index: 20;
+        width: min(360px, calc(100vw - 44px));
+        display: grid;
+        gap: 14px;
+        padding: 16px;
+        border: 1px solid var(--line);
+        border-radius: 20px;
+        background: var(--surface-strong);
+        box-shadow: var(--shadow);
+      }
+      .settings-section {
+        display: grid;
+        gap: 8px;
+      }
+      .settings-user {
+        display: grid;
+        grid-template-columns: 46px minmax(0, 1fr);
+        gap: 12px;
+        align-items: center;
+        padding: 12px 14px;
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        background: var(--surface-soft);
+      }
+      .settings-user-copy {
+        min-width: 0;
+      }
+      .settings-user strong,
+      .settings-user span {
+        display: block;
+      }
+      .settings-popover .locale-toggle,
+      .settings-popover .theme-toggle {
+        justify-content: center;
+        width: 100%;
       }
       .locale-toggle a {
         display: inline-flex;
@@ -1959,6 +2119,16 @@ def style_block() -> str:
           width: 100%;
           justify-content: center;
         }
+        .settings-menu,
+        .settings-trigger {
+          width: 100%;
+          max-width: none;
+        }
+        .settings-popover {
+          width: 100%;
+          right: 0;
+          left: 0;
+        }
         .locale-toggle,
         .theme-toggle {
           justify-content: center;
@@ -1974,21 +2144,7 @@ def style_block() -> str:
 def render_layout(title: str, content: str, user: sqlite3.Row | None = None, lang: str = DEFAULT_LANGUAGE, theme: str = DEFAULT_THEME) -> str:
     home_link = "/dashboard" if user is not None else "/"
     active_theme = theme if theme in SUPPORTED_THEMES else DEFAULT_THEME
-    user_html = ""
-    if user is not None:
-        user_html = f"""
-        <div class="toolbar">
-          <div>
-            <div class="small muted">{h(t('signed_in_as', lang))}</div>
-            <strong>{h(user['name'])}</strong>
-            <div class="small muted">{h(user['role'])} • {h(user['email'])}</div>
-            <div class="small muted">{h(t('logo_click_hint', lang))}</div>
-          </div>
-          <form method="post" action="/logout" class="inline-form">
-            <button class="button-secondary" type="submit">{h(t('sign_out', lang))}</button>
-          </form>
-        </div>
-        """
+    center_html = "" if user is not None else f'<div class="muted small">{h(t("sqlite_note", lang))}</div>'
 
     locale_links = f"""
       <div class="locale-toggle" aria-label="Language">
@@ -2015,6 +2171,50 @@ def render_layout(title: str, content: str, user: sqlite3.Row | None = None, lan
         </button>
       </div>
     """
+    if user is not None:
+        initials = h(user_initials(user["name"]))
+        gear_icon = gear_icon_svg()
+        topbar_actions = f"""
+          <details class="settings-menu">
+            <summary class="settings-trigger" aria-label="{h(t('open_settings', lang))}">
+              <span class="profile-avatar" aria-hidden="true">{initials}</span>
+              <span class="profile-copy">
+                <strong>{h(user['name'])}</strong>
+                <span class="small muted">{h(t('settings', lang))}</span>
+              </span>
+              <span class="profile-gear" aria-hidden="true">{gear_icon}</span>
+            </summary>
+            <div class="settings-popover">
+              <section class="settings-section">
+                <div class="small muted">{h(t('account', lang))}</div>
+                <div class="settings-user">
+                  <span class="profile-avatar" aria-hidden="true">{initials}</span>
+                  <span class="settings-user-copy">
+                    <strong>{h(user['name'])}</strong>
+                    <span class="small muted">{h(user['role'])}</span>
+                    <span class="small muted">{h(user['email'])}</span>
+                  </span>
+                </div>
+              </section>
+              <section class="settings-section">
+                <div class="small muted">{h(t('language', lang))}</div>
+                {locale_links}
+              </section>
+              <section class="settings-section">
+                <div class="small muted">{h(t('theme_label', lang))}</div>
+                {theme_controls}
+              </section>
+              <form method="post" action="/logout">
+                <button class="button-secondary" type="submit">{h(t('sign_out', lang))}</button>
+              </form>
+            </div>
+          </details>
+        """
+    else:
+        topbar_actions = f"""
+          {locale_links}
+          {theme_controls}
+        """
 
     return f"""<!DOCTYPE html>
 <html lang="{h(lang)}" data-theme="{h(active_theme)}">
@@ -2035,10 +2235,9 @@ def render_layout(title: str, content: str, user: sqlite3.Row | None = None, lan
             <div class="small muted">{h(t('brand_subtitle', lang))}</div>
           </div>
         </a>
-        {user_html or f'<div class="muted small">{h(t("sqlite_note", lang))}</div>'}
+        {center_html}
         <div class="topbar-actions">
-          {locale_links}
-          {theme_controls}
+          {topbar_actions}
         </div>
       </section>
       {content}
@@ -2099,6 +2298,20 @@ def render_layout(title: str, content: str, user: sqlite3.Row | None = None, lan
         buttons.forEach((button) => {{
           button.addEventListener("click", () => applyTheme(button.dataset.themeOption));
         }});
+
+        const settingsMenu = document.querySelector(".settings-menu");
+        if (settingsMenu) {{
+          document.addEventListener("click", (event) => {{
+            if (!settingsMenu.contains(event.target)) {{
+              settingsMenu.open = false;
+            }}
+          }});
+          document.addEventListener("keydown", (event) => {{
+            if (event.key === "Escape") {{
+              settingsMenu.open = false;
+            }}
+          }});
+        }}
 
         document.querySelectorAll("form[data-confirm]").forEach((form) => {{
           form.addEventListener("submit", (event) => {{

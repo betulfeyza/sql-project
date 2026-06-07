@@ -129,6 +129,7 @@ The application starts with a shared email/password sign-in screen:
 - self-registration creates `Student` accounts only
 - language can be switched between English and Turkish
 - light/dark mode is available with an animated fade transition
+- signed-in users access account details, language, theme, and sign-out from a compact profile/settings menu in the top bar
 
 For classroom-demo simplicity, seeded setup users use:
 
@@ -163,6 +164,12 @@ Password: Academic123!
 ```
 
 That extra account is not required by `setup.sql`; it depends on the local database state.
+
+### Backend Compatibility
+
+The application includes a small local migration layer for existing `kmf.db` files. If a database was created before password-based login was added, startup adds the missing `Users.password_hash` column, fills seeded demo users with the `Demo123!` hash, creates the user email uniqueness index, and keeps the newer request-history fields in sync.
+
+This lets teammates pull the latest code and continue using an older local SQLite file without deleting their local demo data.
 
 ### Student Dashboard
 
@@ -205,6 +212,7 @@ The frontend stays in sync with the SQLite backend:
 - request updates and delete actions record history in `Request_History`
 - academic approval actions update the same table and still rely on SQL trigger protection
 - the academic conflict feed uses the same recurring schedule overlap logic as the database trigger layer
+- the authenticated top bar keeps frontend controls compact by grouping profile information, language, theme, and logout inside one settings popover
 
 ## How Conflict Detection Works
 
@@ -250,7 +258,7 @@ Then open:
 http://127.0.0.1:8000
 ```
 
-On first run, the application automatically creates `kmf.db` from `setup.sql` if the database file does not already exist.
+On first run, the application automatically creates `kmf.db` from `setup.sql` if the database file does not already exist. On later runs, lightweight migrations update older local databases so the backend and frontend stay compatible after pulling new changes.
 
 ### 2. Sign in with a demo account
 
@@ -297,7 +305,7 @@ ORDER BY block, floor, room_code;
 For a presentation or manual test, use this flow:
 
 1. Start the app and sign in as a student.
-2. Switch between English/Turkish and light/dark mode.
+2. Open the profile/settings menu and switch between English/Turkish and light/dark mode.
 3. Filter rooms in the heatmap.
 4. Click a room card and open the weekly room calendar.
 5. Select an empty time range and create a reservation request.
