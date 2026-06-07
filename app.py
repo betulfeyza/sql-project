@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import html
 import hashlib
+import json
 import secrets
 import string
 import sqlite3
+from datetime import datetime
 from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -18,6 +20,180 @@ HOST = "127.0.0.1"
 PORT = 8000
 SESSION_COOKIE = "kmf_session"
 SESSIONS: dict[str, int] = {}
+
+
+def event_requests_table_sql(table_name: str = "Event_Requests") -> str:
+    return f"""
+    CREATE TABLE {table_name} (
+        request_id INTEGER PRIMARY KEY,
+        requester_id INTEGER NOT NULL,
+        room_id INTEGER NOT NULL,
+        event_title TEXT NOT NULL,
+        event_type TEXT NOT NULL CHECK (event_type IN ('Workshop', 'Club', 'Makeup', 'Exam', 'Seminar')),
+        requested_start TEXT NOT NULL,
+        requested_end TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'Pending' CHECK (status IN ('Pending', 'Approved', 'Rejected', 'Cancelled')),
+        approved_by INTEGER,
+        decision_at TEXT,
+        rejection_reason TEXT,
+        decision_note TEXT,
+        request_note TEXT,
+        FOREIGN KEY (requester_id) REFERENCES Users(user_id)
+            ON UPDATE CASCADE
+            ON DELETE RESTRICT,
+        FOREIGN KEY (room_id) REFERENCES Classrooms(room_id)
+            ON UPDATE CASCADE
+            ON DELETE RESTRICT,
+        FOREIGN KEY (approved_by) REFERENCES Users(user_id)
+            ON UPDATE CASCADE
+            ON DELETE RESTRICT,
+        CHECK (datetime(requested_start) IS NOT NULL),
+        CHECK (datetime(requested_end) IS NOT NULL),
+        CHECK (datetime(requested_end) > datetime(requested_start)),
+        CHECK (
+            (status = 'Pending' AND approved_by IS NULL AND decision_at IS NULL)
+            OR (status = 'Approved' AND approved_by IS NOT NULL AND decision_at IS NOT NULL)
+            OR (status = 'Rejected' AND approved_by IS NOT NULL AND decision_at IS NOT NULL)
+            OR (status = 'Cancelled' AND approved_by IS NULL AND decision_at IS NOT NULL)
+        )
+    );
+    """
+
+
+REQUEST_HISTORY_SQL = """
+CREATE TABLE IF NOT EXISTS Request_History (
+    history_id INTEGER PRIMARY KEY,
+    request_id INTEGER NOT NULL,
+    actor_id INTEGER NOT NULL,
+    action TEXT NOT NULL CHECK (action IN ('Created', 'Updated', 'Cancelled', 'Approved', 'Rejected')),
+    previous_status TEXT CHECK (previous_status IS NULL OR previous_status IN ('Pending', 'Approved', 'Rejected', 'Cancelled')),
+    new_status TEXT NOT NULL CHECK (new_status IN ('Pending', 'Approved', 'Rejected', 'Cancelled')),
+    action_note TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (request_id) REFERENCES Event_Requests(request_id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+    FOREIGN KEY (actor_id) REFERENCES Users(user_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT
+);
+"""
+
+
+def migrate_database() -> None:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA foreign_keys = OFF")
+        table_row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'Event_Requests'"
+        ).fetchone()
+        if table_row is not None:
+            columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(Event_Requests)").fetchall()
+            }
+            table_sql = table_row["sql"] or ""
+            if "Cancelled" not in table_sql or "decision_note" not in columns:
+                triggers = conn.execute(
+                    """
+                    SELECT name, sql
+                    FROM sqlite_master
+                    WHERE type = 'trigger'
+                      AND tbl_name = 'Event_Requests'
+                      AND sql IS NOT NULL
+                    """
+                ).fetchall()
+                indexes = conn.execute(
+                    """
+                    SELECT name, sql
+                    FROM sqlite_master
+                    WHERE type = 'index'
+                      AND tbl_name = 'Event_Requests'
+                      AND sql IS NOT NULL
+                    """
+                ).fetchall()
+                views = conn.execute(
+                    """
+                    SELECT name, sql
+                    FROM sqlite_master
+                    WHERE type = 'view'
+                      AND sql LIKE '%Event_Requests%'
+                      AND sql IS NOT NULL
+                    """
+                ).fetchall()
+                for view in views:
+                    conn.execute(f'DROP VIEW IF EXISTS "{view["name"]}"')
+                conn.execute("DROP TABLE IF EXISTS Event_Requests_new")
+                conn.execute(event_requests_table_sql("Event_Requests_new"))
+                decision_note_select = "decision_note" if "decision_note" in columns else "rejection_reason"
+                conn.execute(
+                    f"""
+                    INSERT INTO Event_Requests_new (
+                        request_id, requester_id, room_id, event_title, event_type,
+                        requested_start, requested_end, status, approved_by, decision_at,
+                        rejection_reason, decision_note, request_note
+                    )
+                    SELECT
+                        request_id, requester_id, room_id, event_title, event_type,
+                        requested_start, requested_end, status, approved_by, decision_at,
+                        rejection_reason, {decision_note_select}, request_note
+                    FROM Event_Requests
+                    """
+                )
+                for trigger in triggers:
+                    conn.execute(f'DROP TRIGGER IF EXISTS "{trigger["name"]}"')
+                for index in indexes:
+                    conn.execute(f'DROP INDEX IF EXISTS "{index["name"]}"')
+                conn.execute("DROP TABLE Event_Requests")
+                conn.execute("ALTER TABLE Event_Requests_new RENAME TO Event_Requests")
+                for index in indexes:
+                    conn.execute(index["sql"])
+                for trigger in triggers:
+                    conn.execute(trigger["sql"])
+                for view in views:
+                    conn.execute(view["sql"])
+
+        conn.execute(REQUEST_HISTORY_SQL)
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_request_history_request_created
+                ON Request_History (request_id, created_at DESC)
+            """
+        )
+        history_count = conn.execute("SELECT COUNT(*) FROM Request_History").fetchone()[0]
+        if history_count == 0:
+            conn.execute(
+                """
+                INSERT INTO Request_History (
+                    request_id, actor_id, action, previous_status, new_status, action_note, created_at
+                )
+                SELECT
+                    request_id, requester_id, 'Created', NULL, 'Pending', request_note,
+                    COALESCE(datetime(decision_at, '-1 minute'), CURRENT_TIMESTAMP)
+                FROM Event_Requests
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO Request_History (
+                    request_id, actor_id, action, previous_status, new_status, action_note, created_at
+                )
+                SELECT
+                    request_id,
+                    COALESCE(approved_by, requester_id),
+                    status,
+                    'Pending',
+                    status,
+                    COALESCE(decision_note, rejection_reason),
+                    COALESCE(decision_at, CURRENT_TIMESTAMP)
+                FROM Event_Requests
+                WHERE status IN ('Approved', 'Rejected', 'Cancelled')
+                """
+            )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def ensure_database() -> None:
@@ -34,6 +210,8 @@ def ensure_database() -> None:
         script = SETUP_PATH.read_text(encoding="utf-8")
         with sqlite3.connect(DB_PATH) as conn:
             conn.executescript(script)
+
+    migrate_database()
 
 
 def get_connection() -> sqlite3.Connection:
@@ -70,6 +248,9 @@ def password_policy_error(password: str) -> str | None:
 LANG_COOKIE = "kmf_lang"
 DEFAULT_LANGUAGE = "en"
 SUPPORTED_LANGUAGES = {"en", "tr"}
+THEME_COOKIE = "kmf_theme"
+DEFAULT_THEME = "light"
+SUPPORTED_THEMES = {"light", "dark"}
 
 TRANSLATIONS: dict[str, dict[str, str]] = {
     "en": {
@@ -80,6 +261,9 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "signed_in_as": "Signed in as",
         "sign_out": "Sign out",
         "sqlite_note": "SQLite-backed demo application",
+        "theme_label": "Theme",
+        "theme_light": "Light",
+        "theme_dark": "Dark",
         "sign_in_title": "Sign In to Your Account",
         "sign_in_description": "Access the classroom management system for students and academics. Sign in with your email and password.",
         "no_account": "Don't have an account?",
@@ -131,7 +315,52 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "type": "Type",
         "room": "Room",
         "start": "Start",
+        "time": "Time",
         "status": "Status",
+        "note": "Note",
+        "details": "Details",
+        "actions": "Actions",
+        "edit": "Edit",
+        "edit_request": "Edit request",
+        "update_request": "Update",
+        "cancel_request": "Delete",
+        "confirm_update_request": "Update this reservation request?",
+        "confirm_cancel_request": "Delete this reservation request?",
+        "decision_note": "Decision note",
+        "open_calendar": "Open calendar",
+        "room_calendar": "Room Calendar",
+        "week": "Week",
+        "previous_week": "Previous week",
+        "next_week": "Next week",
+        "today": "Today",
+        "close": "Close",
+        "busy": "Busy",
+        "selected_time": "Selected time",
+        "select_time": "Select time",
+        "reservation_details": "Reservation Details",
+        "reserve_selected_time": "Reserve selected time",
+        "calendar_busy_academic": "Academic booking",
+        "calendar_busy_request": "Reservation",
+        "calendar_pending": "Pending",
+        "calendar_approved": "Approved",
+        "calendar_unavailable_range": "Selected range contains a busy block.",
+        "calendar_select_end": "Select an end time.",
+        "calendar_no_selection": "No time selected",
+        "event_title_placeholder": "Event title",
+        "review_note": "Review note",
+        "review_note_hint": "Optional approval note, required rejection reason",
+        "request_history": "Request History",
+        "no_history_yet": "No request history has been recorded yet.",
+        "alternative_rooms": "Alternative rooms",
+        "try_alternative_rooms": "Conflict detected. Try these rooms: {rooms}",
+        "no_alternative_rooms": "Conflict detected. No alternative room is available for this time range.",
+        "created_by": "by {actor}",
+        "action_created": "Created",
+        "action_updated": "Updated",
+        "action_cancelled": "Cancelled",
+        "action_approved": "Approved",
+        "action_rejected": "Rejected",
+        "percent_full": "{percent}% full",
         "no_requests_yet": "No reservation request has been created by this student yet.",
         "end": "End",
         "event_type_workshop": "Workshop",
@@ -163,17 +392,46 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "current_state": "Current state",
         "no_active_conflict": "No active conflict is detected in pending or approved requests.",
         "clear": "Clear",
+        "conflict": "Conflict",
+        "schedule_type_lecture": "Lecture",
+        "schedule_type_exam": "Exam",
+        "schedule_type_seminar": "Seminar",
+        "no_schedule_assigned": "No schedule assigned to this academic yet.",
+        "no_exam_records": "No exam records are available.",
+        "occupancy_trend": "Occupancy trend",
+        "overlapping_requests": "Overlapping requests",
+        "overlaps_with": "{room} overlaps with {schedule}",
         "request_submitted_success": "Request submitted successfully",
+        "request_updated_success": "Request updated successfully",
+        "request_cancelled_success": "Request cancelled successfully",
         "only_students_submit": "Only students can submit requests",
         "only_academics_review": "Only academic users can review requests",
         "unsupported_decision": "Unsupported decision",
         "request_approved_success": "Request approved successfully",
         "request_rejected_success": "Request rejected successfully",
+        "pending_request_required": "Only pending requests can be changed.",
+        "rejection_reason_required": "Rejection reason is required.",
         "all_fields_required": "All fields are required",
+        "email_password_required": "Email and password are required",
+        "invalid_credentials": "Invalid email or password",
+        "please_sign_in_first": "Please sign in first",
         "invalid_email": "Invalid email address",
         "passwords_do_not_match": "Passwords do not match",
+        "password_min_length": "Password must be at least 6 characters",
+        "password_uppercase": "Password must contain at least one uppercase letter",
+        "password_digit": "Password must contain at least one digit",
+        "password_punctuation": "Password must contain at least one punctuation character",
         "account_created": "Account created successfully. Please sign in.",
         "email_exists": "Email already exists",
+        "academic_approval_required": "Only academic users can approve event requests.",
+        "occupancy_capacity_error": "Occupancy cannot exceed classroom capacity.",
+        "recurring_schedule_conflict": "This schedule conflicts with an existing recurring classroom booking.",
+        "event_recurring_schedule_conflict": "This request conflicts with an academic schedule for the selected classroom.",
+        "approved_request_conflict": "This approved request conflicts with another approved request.",
+        "event_request_conflict": "This request overlaps with another pending or approved reservation for the selected classroom.",
+        "request_time_invalid": "End time must be after start time.",
+        "room_or_user_invalid": "Selected room or user is invalid.",
+        "form_data_invalid": "Please check the form values and try again.",
         "yes": "Yes",
         "no": "No",
     },
@@ -185,6 +443,9 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "signed_in_as": "Giriş yapan",
         "sign_out": "Çıkış yap",
         "sqlite_note": "SQLite destekli demo uygulama",
+        "theme_label": "Tema",
+        "theme_light": "Açık",
+        "theme_dark": "Koyu",
         "sign_in_title": "Hesabınıza Giriş Yapın",
         "sign_in_description": "Öğrenciler ve akademisyenler için sınıf yönetim sistemine erişin. E-posta ve parolanızla giriş yapın.",
         "no_account": "Hesabın yok mu?",
@@ -236,7 +497,52 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "type": "Tür",
         "room": "Oda",
         "start": "Başlangıç",
+        "time": "Zaman",
         "status": "Durum",
+        "note": "Not",
+        "details": "Detaylar",
+        "actions": "İşlemler",
+        "edit": "Düzenle",
+        "edit_request": "Talebi düzenle",
+        "update_request": "Güncelle",
+        "cancel_request": "Sil",
+        "confirm_update_request": "Bu rezervasyon talebini güncellemek istediğine emin misin?",
+        "confirm_cancel_request": "Bu rezervasyon talebini silmek istediğine emin misin?",
+        "decision_note": "Karar notu",
+        "open_calendar": "Takvimi aç",
+        "room_calendar": "Oda Takvimi",
+        "week": "Hafta",
+        "previous_week": "Önceki hafta",
+        "next_week": "Sonraki hafta",
+        "today": "Bugün",
+        "close": "Kapat",
+        "busy": "Dolu",
+        "selected_time": "Seçilen zaman",
+        "select_time": "Zaman seç",
+        "reservation_details": "Rezervasyon Detayları",
+        "reserve_selected_time": "Seçilen zamanı rezerve et",
+        "calendar_busy_academic": "Akademik kullanım",
+        "calendar_busy_request": "Rezervasyon",
+        "calendar_pending": "Beklemede",
+        "calendar_approved": "Onaylandı",
+        "calendar_unavailable_range": "Seçilen aralıkta dolu blok var.",
+        "calendar_select_end": "Bitiş zamanını seçin.",
+        "calendar_no_selection": "Zaman seçilmedi",
+        "event_title_placeholder": "Etkinlik başlığı",
+        "review_note": "İnceleme notu",
+        "review_note_hint": "Onay notu isteğe bağlı, ret nedeni zorunlu",
+        "request_history": "Talep Geçmişi",
+        "no_history_yet": "Henüz talep geçmişi kaydı yok.",
+        "alternative_rooms": "Alternatif odalar",
+        "try_alternative_rooms": "Çakışma tespit edildi. Bu odaları deneyin: {rooms}",
+        "no_alternative_rooms": "Çakışma tespit edildi. Bu zaman aralığı için uygun alternatif oda yok.",
+        "created_by": "{actor} tarafından",
+        "action_created": "Oluşturuldu",
+        "action_updated": "Güncellendi",
+        "action_cancelled": "İptal edildi",
+        "action_approved": "Onaylandı",
+        "action_rejected": "Reddedildi",
+        "percent_full": "%{percent} dolu",
         "no_requests_yet": "Bu öğrenci tarafından henüz rezervasyon talebi oluşturulmadı.",
         "end": "Bitiş",
         "event_type_workshop": "Atölye",
@@ -268,17 +574,46 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "current_state": "Mevcut durum",
         "no_active_conflict": "Bekleyen veya onaylanmış taleplerde aktif çakışma tespit edilmedi.",
         "clear": "Temiz",
+        "conflict": "Çakışma",
+        "schedule_type_lecture": "Ders",
+        "schedule_type_exam": "Sınav",
+        "schedule_type_seminar": "Seminer",
+        "no_schedule_assigned": "Bu akademisyene atanmış program henüz yok.",
+        "no_exam_records": "Sınav kaydı bulunmuyor.",
+        "occupancy_trend": "Doluluk eğilimi",
+        "overlapping_requests": "Çakışan talepler",
+        "overlaps_with": "{room}, {schedule} ile çakışıyor",
         "request_submitted_success": "Talep başarıyla gönderildi",
+        "request_updated_success": "Talep başarıyla güncellendi",
+        "request_cancelled_success": "Talep başarıyla iptal edildi",
         "only_students_submit": "Sadece öğrenciler talep gönderebilir",
         "only_academics_review": "Sadece akademik kullanıcılar talepleri inceleyebilir",
         "unsupported_decision": "Desteklenmeyen karar",
         "request_approved_success": "Talep başarıyla onaylandı",
         "request_rejected_success": "Talep başarıyla reddedildi",
+        "pending_request_required": "Sadece bekleyen talepler değiştirilebilir.",
+        "rejection_reason_required": "Ret nedeni zorunludur.",
         "all_fields_required": "Tüm alanlar zorunludur",
+        "email_password_required": "E-posta ve parola zorunludur",
+        "invalid_credentials": "E-posta veya parola hatalı",
+        "please_sign_in_first": "Lütfen önce giriş yapın",
         "invalid_email": "Geçersiz e-posta adresi",
         "passwords_do_not_match": "Parolalar eşleşmiyor",
+        "password_min_length": "Parola en az 6 karakter olmalıdır",
+        "password_uppercase": "Parola en az bir büyük harf içermelidir",
+        "password_digit": "Parola en az bir rakam içermelidir",
+        "password_punctuation": "Parola en az bir noktalama işareti içermelidir",
         "account_created": "Hesap başarıyla oluşturuldu. Lütfen giriş yapın.",
         "email_exists": "E-posta zaten mevcut",
+        "academic_approval_required": "Etkinlik taleplerini yalnızca akademik kullanıcılar onaylayabilir.",
+        "occupancy_capacity_error": "Doluluk sayısı sınıf kapasitesini aşamaz.",
+        "recurring_schedule_conflict": "Bu program, seçilen sınıftaki mevcut tekrarlayan programla çakışıyor.",
+        "event_recurring_schedule_conflict": "Bu talep, seçilen sınıftaki akademik programla çakışıyor.",
+        "approved_request_conflict": "Bu onaylı talep başka bir onaylı taleple çakışıyor.",
+        "event_request_conflict": "Bu talep, seçilen sınıftaki bekleyen veya onaylı başka bir rezervasyonla çakışıyor.",
+        "request_time_invalid": "Bitiş zamanı başlangıç zamanından sonra olmalıdır.",
+        "room_or_user_invalid": "Seçilen oda veya kullanıcı geçersiz.",
+        "form_data_invalid": "Lütfen form değerlerini kontrol edip tekrar deneyin.",
         "yes": "Evet",
         "no": "Hayır",
     },
@@ -294,6 +629,7 @@ def translate_status(status: str, lang: str) -> str:
         "Pending": {"en": "Pending", "tr": "Beklemede"},
         "Approved": {"en": "Approved", "tr": "Onaylandı"},
         "Rejected": {"en": "Rejected", "tr": "Reddedildi"},
+        "Cancelled": {"en": "Cancelled", "tr": "İptal edildi"},
         "Available": {"en": "Available", "tr": "Mevcut"},
     "Reserved": {"en": "Reserved", "tr": "Rezerve"},
     "Occupied": {"en": "Occupied", "tr": "Dolu"},
@@ -302,6 +638,10 @@ def translate_status(status: str, lang: str) -> str:
         "Unknown": {"en": "Unknown", "tr": "Bilinmiyor"},
     }
     return status_map.get(status, {"en": status, "tr": status}).get(lang, status)
+
+
+def translate_history_action(action: str, lang: str) -> str:
+    return t(f"action_{action.strip().lower()}", lang)
 
 
 def yes_no(value: bool, lang: str) -> str:
@@ -329,12 +669,261 @@ def get_language(handler: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
     return None
 
 
+def get_theme(handler: BaseHTTPRequestHandler, params: dict[str, list[str]]) -> str:
+    requested = params.get("theme", [""])[0].lower()
+    if requested in SUPPORTED_THEMES:
+        return requested
+    cookie_header = handler.headers.get("Cookie")
+    if cookie_header:
+        jar = cookies.SimpleCookie()
+        jar.load(cookie_header)
+        theme_cookie = jar.get(THEME_COOKIE)
+        if theme_cookie and theme_cookie.value in SUPPORTED_THEMES:
+            return theme_cookie.value
+    return DEFAULT_THEME
+
+
 def translate_event_type(event_type: str | None, lang: str) -> str:
     if not event_type:
         return ""
     key = f"event_type_{event_type.strip().lower()}"
     # fallback to raw value when translation key missing
     return TRANSLATIONS.get(lang, TRANSLATIONS[DEFAULT_LANGUAGE]).get(key, event_type)
+
+
+def translate_schedule_type(schedule_type: str | None, lang: str) -> str:
+    if not schedule_type:
+        return ""
+    key = f"schedule_type_{schedule_type.strip().lower()}"
+    return TRANSLATIONS.get(lang, TRANSLATIONS[DEFAULT_LANGUAGE]).get(key, schedule_type)
+
+
+EN_MONTHS = {
+    1: "Jan",
+    2: "Feb",
+    3: "Mar",
+    4: "Apr",
+    5: "May",
+    6: "Jun",
+    7: "Jul",
+    8: "Aug",
+    9: "Sep",
+    10: "Oct",
+    11: "Nov",
+    12: "Dec",
+}
+
+
+def format_datetime(value: object, lang: str) -> str:
+    if value is None:
+        return ""
+    raw = str(value)
+    parsed: datetime | None = None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M"):
+        try:
+            parsed = datetime.strptime(raw, fmt)
+            break
+        except ValueError:
+            continue
+    if parsed is None:
+        return raw
+    if lang == "tr":
+        return f"{parsed.day:02d}.{parsed.month:02d}.{parsed.year} {parsed.hour:02d}:{parsed.minute:02d}"
+    return f"{EN_MONTHS[parsed.month]} {parsed.day}, {parsed.year} {parsed.hour:02d}:{parsed.minute:02d}"
+
+
+def normalize_datetime_input(value: str) -> str:
+    normalized = value.strip().replace("T", " ")
+    if len(normalized) == 16:
+        return f"{normalized}:00"
+    return normalized
+
+
+def datetime_local_value(value: object) -> str:
+    if value is None:
+        return ""
+    raw = str(value).replace(" ", "T")
+    return raw[:16]
+
+
+def datetime_iso_value(value: object) -> str:
+    return datetime_local_value(value) + ":00" if datetime_local_value(value) else ""
+
+
+def room_options_html(rooms: list[sqlite3.Row], selected_room_id: object | None = None) -> str:
+    selected = "" if selected_room_id is None else str(selected_room_id)
+    return "".join(
+        f'<option value="{h(room["room_id"])}" {"selected" if str(room["room_id"]) == selected else ""}>{h(room["room_code"])}</option>'
+        for room in rooms
+    )
+
+
+def event_type_options_html(selected_event_type: str, lang: str) -> str:
+    event_types = ("Workshop", "Club", "Makeup", "Exam", "Seminar")
+    return "".join(
+        f'<option value="{h(event_type)}" {"selected" if event_type == selected_event_type else ""}>{h(translate_event_type(event_type, lang))}</option>'
+        for event_type in event_types
+    )
+
+
+EVENT_REQUEST_CONFLICT_MESSAGE = "Event request conflicts with another pending or approved request."
+
+
+def find_conflicting_event_request(
+    conn: sqlite3.Connection,
+    room_id: int,
+    requested_start: str,
+    requested_end: str,
+    current_request_id: int | None = None,
+) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT request_id, event_title, status
+        FROM Event_Requests
+        WHERE room_id = ?
+          AND status IN ('Pending', 'Approved')
+          AND (? IS NULL OR request_id <> ?)
+          AND datetime(?) < datetime(requested_end)
+          AND datetime(?) > datetime(requested_start)
+        LIMIT 1
+        """,
+        (
+            room_id,
+            current_request_id,
+            current_request_id,
+            requested_start,
+            requested_end,
+        ),
+    ).fetchone()
+
+
+def find_alternative_rooms(
+    conn: sqlite3.Connection,
+    requested_start: str,
+    requested_end: str,
+    current_room_id: int | None = None,
+    current_request_id: int | None = None,
+    limit: int = 3,
+) -> list[sqlite3.Row]:
+    params = {
+        "requested_start": requested_start,
+        "requested_end": requested_end,
+        "current_room_id": current_room_id,
+        "current_request_id": current_request_id,
+        "limit": limit,
+    }
+    return conn.execute(
+        """
+        SELECT c.room_id, c.room_code, c.capacity
+        FROM Classrooms c
+        WHERE c.is_active = 1
+          AND (:current_room_id IS NULL OR c.room_id <> :current_room_id)
+          AND NOT EXISTS (
+            SELECT 1
+            FROM Academic_Schedules s
+            WHERE s.room_id = c.room_id
+              AND (
+                (
+                  date(:requested_start) = date(s.start_at)
+                  AND datetime(:requested_start) < datetime(s.end_at)
+                  AND datetime(:requested_end) > datetime(s.start_at)
+                )
+                OR (
+                  s.recurrence_pattern IN ('Weekly', 'Biweekly')
+                  AND (
+                    CASE strftime('%w', :requested_start)
+                      WHEN '0' THEN 7
+                      ELSE CAST(strftime('%w', :requested_start) AS INTEGER)
+                    END
+                  ) = s.weekday
+                  AND date(:requested_start) >= date(s.start_at)
+                  AND time(:requested_start) < time(s.end_at)
+                  AND time(:requested_end) > time(s.start_at)
+                  AND (
+                    s.recurrence_pattern = 'Weekly'
+                    OR ABS(CAST(julianday(date(:requested_start)) - julianday(date(s.start_at)) AS INTEGER)) % 14 = 0
+                  )
+                )
+              )
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM Event_Requests e
+            WHERE e.room_id = c.room_id
+              AND e.status IN ('Pending', 'Approved')
+              AND (:current_request_id IS NULL OR e.request_id <> :current_request_id)
+              AND datetime(:requested_start) < datetime(e.requested_end)
+              AND datetime(:requested_end) > datetime(e.requested_start)
+          )
+        ORDER BY c.block, c.floor, c.room_code
+        LIMIT :limit
+        """,
+        params,
+    ).fetchall()
+
+
+def conflict_feedback(message: str, alternatives: list[sqlite3.Row], lang: str) -> str:
+    if alternatives:
+        rooms = ", ".join(row["room_code"] for row in alternatives)
+        return t("try_alternative_rooms", lang).format(rooms=rooms)
+    translated = translate_flash_message(message, lang)
+    if translated == message:
+        return t("no_alternative_rooms", lang)
+    return f"{translated} {t('no_alternative_rooms', lang)}"
+
+
+FLASH_MESSAGE_KEYS = {
+    "Account created successfully. Please sign in.": "account_created",
+    "All fields are required": "all_fields_required",
+    "Approved event request conflicts with another approved request.": "approved_request_conflict",
+    "Email already exists": "email_exists",
+    "Email and password are required": "email_password_required",
+    "Event request conflicts with a recurring academic schedule.": "event_recurring_schedule_conflict",
+    "Event request conflicts with an academic schedule.": "event_recurring_schedule_conflict",
+    EVENT_REQUEST_CONFLICT_MESSAGE: "event_request_conflict",
+    "FOREIGN KEY constraint failed": "room_or_user_invalid",
+    "Invalid email address": "invalid_email",
+    "Invalid email or password": "invalid_credentials",
+    "Occupancy count cannot exceed classroom capacity.": "occupancy_capacity_error",
+    "Only Academic users can approve event requests.": "academic_approval_required",
+    "Only academic users can review requests": "only_academics_review",
+    "Only students can submit requests": "only_students_submit",
+    "Password must be at least 6 characters": "password_min_length",
+    "Password must contain at least one digit": "password_digit",
+    "Password must contain at least one punctuation character": "password_punctuation",
+    "Password must contain at least one uppercase letter": "password_uppercase",
+    "Passwords do not match": "passwords_do_not_match",
+    "Please sign in first": "please_sign_in_first",
+    "Recurring schedule conflict detected for the selected classroom.": "recurring_schedule_conflict",
+    "Request approved successfully": "request_approved_success",
+    "Request cancelled successfully": "request_cancelled_success",
+    "Request rejected successfully": "request_rejected_success",
+    "Request submitted successfully": "request_submitted_success",
+    "Request updated successfully": "request_updated_success",
+    "Only pending requests can be changed.": "pending_request_required",
+    "Rejection reason is required.": "rejection_reason_required",
+    "Schedule conflict detected for the selected classroom.": "recurring_schedule_conflict",
+    "Unsupported decision": "unsupported_decision",
+    "CHECK constraint failed: datetime(requested_end) > datetime(requested_start)": "request_time_invalid",
+    "CHECK constraint failed: datetime(end_at) > datetime(start_at)": "request_time_invalid",
+}
+
+
+def translate_flash_message(message: str, lang: str) -> str:
+    clean_message = message.strip()
+    key = FLASH_MESSAGE_KEYS.get(clean_message)
+    if key is not None:
+        return t(key, lang)
+    if clean_message.startswith("CHECK constraint failed"):
+        return t("form_data_invalid", lang)
+    return clean_message
+
+
+def render_flash(message: str, error: bool, lang: str) -> str:
+    if not message:
+        return ""
+    flash_class = "error" if error else "success"
+    return f'<div class="flash {flash_class}">{h(translate_flash_message(message, lang))}</div>'
 
 
 def logo_svg() -> str:
@@ -367,9 +956,14 @@ def style_block() -> str:
     return """
     <style>
       :root {
+        color-scheme: light;
         --bg: #f4efe6;
         --surface: rgba(255, 250, 241, 0.92);
         --surface-strong: #fffaf2;
+        --surface-soft: rgba(255,255,255,0.76);
+        --field-bg: rgba(255,255,255,0.88);
+        --link-bg: rgba(255,255,255,0.82);
+        --flash-bg: rgba(255,255,255,0.70);
         --ink: #152321;
         --muted: #60716c;
         --line: rgba(21, 35, 33, 0.10);
@@ -380,34 +974,226 @@ def style_block() -> str:
         --warn: #b67828;
         --danger: #a53737;
         --shadow: 0 18px 46px rgba(21, 35, 33, 0.10);
+        --card-shadow: 0 10px 28px rgba(21, 35, 33, 0.05);
+        --brand-shadow: 0 12px 24px rgba(21, 35, 33, 0.18);
+        --body-bg:
+          radial-gradient(circle at top left, rgba(212, 104, 63, 0.14), transparent 30%),
+          radial-gradient(circle at right 12%, rgba(31, 90, 97, 0.15), transparent 28%),
+          linear-gradient(180deg, #faf6ee 0%, #efe4d1 100%);
+        --hero-bg:
+          linear-gradient(140deg, rgba(255,255,255,0.70), rgba(255,255,255,0.28)),
+          linear-gradient(120deg, rgba(212,104,63,0.18), rgba(31,90,97,0.10));
+        --primary-button-bg: #152321;
+        --primary-button-text: #ffffff;
+        --secondary-button-bg: rgba(21, 35, 33, 0.08);
+        --room-tag-border: rgba(255,255,255,0.20);
+        --room-glow: rgba(255,255,255,0.12);
+      }
+      html[data-theme="dark"] {
+        color-scheme: dark;
+        --bg: #0e1518;
+        --surface: rgba(20, 31, 34, 0.92);
+        --surface-strong: #18272b;
+        --surface-soft: rgba(255,255,255,0.06);
+        --field-bg: rgba(255,255,255,0.08);
+        --link-bg: rgba(255,255,255,0.07);
+        --flash-bg: rgba(255,255,255,0.06);
+        --ink: #eef5f2;
+        --muted: #a5b8b3;
+        --line: rgba(238, 245, 242, 0.14);
+        --accent: #f08a63;
+        --accent-strong: #c95845;
+        --deep: #86d0d5;
+        --ok: #7dd6b2;
+        --warn: #e2b162;
+        --danger: #f18d8d;
+        --shadow: 0 18px 46px rgba(0, 0, 0, 0.32);
+        --card-shadow: 0 10px 28px rgba(0, 0, 0, 0.24);
+        --brand-shadow: 0 12px 26px rgba(0, 0, 0, 0.36);
+        --body-bg:
+          radial-gradient(circle at top left, rgba(240, 138, 99, 0.16), transparent 28%),
+          radial-gradient(circle at right 12%, rgba(134, 208, 213, 0.14), transparent 26%),
+          linear-gradient(180deg, #10191c 0%, #0b1114 100%);
+        --hero-bg:
+          linear-gradient(140deg, rgba(255,255,255,0.09), rgba(255,255,255,0.03)),
+          linear-gradient(120deg, rgba(240,138,99,0.12), rgba(134,208,213,0.09));
+        --primary-button-bg: #eef5f2;
+        --primary-button-text: #10191c;
+        --secondary-button-bg: rgba(255,255,255,0.09);
+        --room-tag-border: rgba(255,255,255,0.24);
+        --room-glow: rgba(255,255,255,0.10);
       }
       * { box-sizing: border-box; }
+      html.theme-transition,
+      html.theme-transition *,
+      html.theme-transition *::before,
+      html.theme-transition *::after {
+        transition:
+          background-color 640ms ease,
+          border-color 640ms ease,
+          color 640ms ease,
+          box-shadow 640ms ease,
+          opacity 640ms ease,
+          filter 640ms ease;
+      }
       body {
         margin: 0;
         font-family: "Segoe UI", Tahoma, sans-serif;
         color: var(--ink);
-        background:
-          radial-gradient(circle at top left, rgba(212, 104, 63, 0.14), transparent 30%),
-          radial-gradient(circle at right 12%, rgba(31, 90, 97, 0.15), transparent 28%),
-          linear-gradient(180deg, #faf6ee 0%, #efe4d1 100%);
+        background: var(--body-bg);
+      }
+      body.scheduler-open {
+        overflow: hidden;
+      }
+      .theme-fade-layer {
+        position: fixed;
+        inset: 0;
+        z-index: 999;
+        pointer-events: none;
+        opacity: 0;
+        background: #05090b;
+        transition: opacity 520ms ease;
+      }
+      .theme-fade-layer.active {
+        opacity: 0.34;
       }
       a { color: inherit; text-decoration: none; }
-      .locale-toggle {
+      .topbar-actions,
+      .locale-toggle,
+      .theme-toggle {
         display: inline-flex;
         align-items: center;
-        gap: 10px;
+        gap: 6px;
         justify-content: flex-end;
       }
+      .topbar-actions {
+        align-content: flex-end;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
       .locale-toggle a {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        min-height: 34px;
+        padding: 7px 10px;
+        border-radius: 999px;
         color: var(--ink);
-        opacity: 0.7;
+        opacity: 0.72;
       }
       .locale-toggle a.active {
         opacity: 1;
         font-weight: 700;
+        background: var(--link-bg);
+        box-shadow: inset 0 0 0 1px var(--line);
       }
-      .locale-toggle span {
+      .locale-toggle .divider {
         color: var(--muted);
+        opacity: 0.58;
+        font-weight: 700;
+      }
+      .locale-toggle {
+        gap: 2px;
+        padding: 4px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: var(--surface-soft);
+      }
+      .flag-icon,
+      .theme-icon {
+        display: inline-block;
+        flex: 0 0 auto;
+        width: 18px;
+        height: 18px;
+      }
+      .flag-icon {
+        position: relative;
+        overflow: hidden;
+        border-radius: 50%;
+        box-shadow: 0 0 0 1px var(--line), 0 3px 8px rgba(0, 0, 0, 0.10);
+      }
+      .flag-en {
+        background:
+          linear-gradient(0deg, transparent 0 42%, rgba(255,255,255,0.96) 42% 58%, transparent 58%),
+          linear-gradient(90deg, transparent 0 42%, rgba(255,255,255,0.96) 42% 58%, transparent 58%),
+          linear-gradient(35deg, transparent 0 44%, #cf3341 44% 56%, transparent 56%),
+          linear-gradient(145deg, transparent 0 44%, #cf3341 44% 56%, transparent 56%),
+          #24457c;
+      }
+      .flag-tr {
+        background: #e30a17;
+      }
+      .flag-tr::before {
+        content: "";
+        position: absolute;
+        top: 4px;
+        left: 4px;
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: #fff;
+      }
+      .flag-tr::after {
+        content: "";
+        position: absolute;
+        top: 4px;
+        left: 7px;
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: #e30a17;
+      }
+      .theme-toggle {
+        gap: 4px;
+        padding: 4px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: var(--surface-soft);
+      }
+      .theme-option {
+        width: auto;
+        margin-top: 0;
+        min-height: 34px;
+        padding: 7px 11px;
+        border-radius: 999px;
+        border: 0;
+        color: var(--muted);
+        background: transparent;
+        font-size: 0.84rem;
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+      }
+      .theme-option.active {
+        color: var(--ink);
+        background: var(--link-bg);
+        box-shadow: inset 0 0 0 1px var(--line);
+      }
+      .theme-icon {
+        position: relative;
+        width: 16px;
+        height: 16px;
+      }
+      .theme-sun {
+        border-radius: 50%;
+        background: #f4b94f;
+        box-shadow: 0 0 0 3px rgba(244, 185, 79, 0.18);
+      }
+      .theme-sun::before {
+        content: "";
+        position: absolute;
+        inset: -3px;
+        border-radius: 50%;
+        background:
+          linear-gradient(#f4b94f, #f4b94f) center top / 2px 3px no-repeat,
+          linear-gradient(#f4b94f, #f4b94f) center bottom / 2px 3px no-repeat,
+          linear-gradient(90deg, #f4b94f, #f4b94f) left center / 3px 2px no-repeat,
+          linear-gradient(90deg, #f4b94f, #f4b94f) right center / 3px 2px no-repeat;
+      }
+      .theme-moon {
+        border-radius: 50%;
+        background: #6f8494;
+        box-shadow: inset -4px 0 0 #dce8ee;
       }
       .app-shell {
         width: min(1240px, calc(100% - 32px));
@@ -429,21 +1215,25 @@ def style_block() -> str:
         display: inline-flex;
         align-items: center;
         gap: 14px;
+        min-width: 0;
       }
       .brand-mark {
         width: 60px;
         height: 60px;
         flex: 0 0 auto;
-        filter: drop-shadow(0 12px 24px rgba(21, 35, 33, 0.18));
+        filter: drop-shadow(var(--brand-shadow));
       }
       .brand-copy {
         display: flex;
         flex-direction: column;
         gap: 2px;
+        min-width: 0;
       }
       .brand h1 {
         margin: 4px 0 0;
         font-size: 1.5rem;
+        line-height: 1.15;
+        overflow-wrap: anywhere;
       }
       .eyebrow {
         font-size: 12px;
@@ -456,14 +1246,15 @@ def style_block() -> str:
         padding: 28px;
         border-radius: 28px;
         border: 1px solid var(--line);
-        background:
-          linear-gradient(140deg, rgba(255,255,255,0.70), rgba(255,255,255,0.28)),
-          linear-gradient(120deg, rgba(212,104,63,0.18), rgba(31,90,97,0.10));
+        background: var(--hero-bg);
         box-shadow: var(--shadow);
       }
       .hero-grid, .grid-2, .grid-3 {
         display: grid;
         gap: 18px;
+      }
+      .hero-grid > *, .grid-2 > *, .grid-3 > * {
+        min-width: 0;
       }
       .hero-grid { grid-template-columns: 1.15fr 0.85fr; }
       .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -473,7 +1264,8 @@ def style_block() -> str:
         border: 1px solid var(--line);
         border-radius: 24px;
         padding: 20px;
-        box-shadow: 0 10px 28px rgba(21, 35, 33, 0.05);
+        box-shadow: var(--card-shadow);
+        min-width: 0;
       }
       .card h2, .card h3, .card h4, .hero h2 {
         margin-top: 0;
@@ -490,7 +1282,7 @@ def style_block() -> str:
         padding: 10px 14px;
         border: 1px solid var(--line);
         border-radius: 999px;
-        background: rgba(255,255,255,0.76);
+        background: var(--surface-soft);
         font-size: 0.92rem;
       }
       .badge {
@@ -514,7 +1306,7 @@ def style_block() -> str:
       .stat-box, .list-row {
         padding: 14px 16px;
         border-radius: 18px;
-        background: rgba(255,255,255,0.76);
+        background: var(--surface-soft);
         border: 1px solid var(--line);
       }
       .heatmap {
@@ -522,6 +1314,27 @@ def style_block() -> str:
         grid-template-columns: repeat(3, minmax(0, 1fr));
         gap: 14px;
         margin-top: 14px;
+        max-height: clamp(430px, 62vh, 680px);
+        overflow-x: hidden;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        padding-right: 8px;
+        scrollbar-color: var(--muted) transparent;
+        scrollbar-gutter: stable;
+        align-content: start;
+      }
+      .heatmap::-webkit-scrollbar {
+        width: 8px;
+      }
+      .heatmap::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      .heatmap::-webkit-scrollbar-thumb {
+        background: var(--line);
+        border-radius: 999px;
+      }
+      .heatmap::-webkit-scrollbar-thumb:hover {
+        background: var(--muted);
       }
       .room-card {
         border-radius: 22px;
@@ -530,6 +1343,24 @@ def style_block() -> str:
         color: #fff;
         position: relative;
         overflow: hidden;
+      }
+      .room-card-button {
+        display: block;
+        width: 100%;
+        margin-top: 0;
+        border: 0;
+        text-align: left;
+        font: inherit;
+        cursor: pointer;
+        transition: transform 160ms ease, box-shadow 160ms ease, filter 160ms ease;
+      }
+      .room-card-button:hover {
+        transform: translateY(-2px);
+        filter: brightness(1.04);
+      }
+      .room-card-button:focus-visible {
+        outline: 3px solid rgba(134, 208, 213, 0.72);
+        outline-offset: 3px;
       }
       .room-card.low { background: linear-gradient(140deg, #1f5a61, #12383c); }
       .room-card.medium { background: linear-gradient(140deg, #bb7b2f, #8f561e); }
@@ -542,13 +1373,14 @@ def style_block() -> str:
         width: 92px;
         height: 92px;
         border-radius: 50%;
-        background: rgba(255,255,255,0.12);
+        background: var(--room-glow);
       }
       .room-head, .form-row, .toolbar {
         display: flex;
         justify-content: space-between;
         gap: 12px;
         align-items: center;
+        min-width: 0;
       }
       .room-tags {
         position: relative;
@@ -560,9 +1392,228 @@ def style_block() -> str:
       }
       .room-tags span {
         padding: 6px 10px;
-        border: 1px solid rgba(255,255,255,0.20);
+        border: 1px solid var(--room-tag-border);
         border-radius: 999px;
         font-size: 0.78rem;
+      }
+      .scheduler-modal[hidden] {
+        display: none;
+      }
+      .scheduler-modal {
+        position: fixed;
+        inset: 0;
+        z-index: 100;
+        display: grid;
+        place-items: center;
+        padding: 18px;
+      }
+      .scheduler-backdrop {
+        position: absolute;
+        inset: 0;
+        width: auto;
+        margin: 0;
+        padding: 0;
+        border: 0;
+        border-radius: 0;
+        background: rgba(3, 8, 10, 0.68);
+        backdrop-filter: blur(12px);
+      }
+      .scheduler-shell {
+        position: relative;
+        z-index: 1;
+        width: min(1360px, calc(100vw - 28px));
+        max-height: min(880px, calc(100vh - 28px));
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 24px;
+        background: var(--surface-strong);
+        box-shadow: 0 28px 80px rgba(0, 0, 0, 0.34);
+      }
+      .scheduler-header,
+      .scheduler-toolbar,
+      .scheduler-side {
+        border-bottom: 1px solid var(--line);
+      }
+      .scheduler-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 18px 20px;
+      }
+      .scheduler-header h2 {
+        margin: 2px 0 0;
+        font-size: 1.24rem;
+      }
+      .icon-button {
+        width: 40px;
+        height: 40px;
+        min-width: 40px;
+        margin-top: 0;
+        padding: 0;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 999px;
+        color: var(--ink);
+        background: var(--secondary-button-bg);
+      }
+      .scheduler-toolbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 12px 16px;
+        flex-wrap: wrap;
+      }
+      .scheduler-toolbar-group,
+      .scheduler-legend {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .scheduler-toolbar button {
+        width: auto;
+        margin-top: 0;
+        min-width: 42px;
+        padding: 8px 12px;
+      }
+      .scheduler-range {
+        font-weight: 800;
+      }
+      .legend-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        display: inline-block;
+      }
+      .legend-dot.busy { background: var(--danger); }
+      .legend-dot.selected { background: var(--deep); }
+      .scheduler-main {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 330px;
+        min-height: 0;
+      }
+      .scheduler-grid-wrap {
+        overflow: auto;
+        min-height: 0;
+        max-height: calc(min(880px, 100vh - 28px) - 150px);
+        background: var(--surface);
+      }
+      .scheduler-grid {
+        display: grid;
+        grid-template-columns: 70px repeat(7, minmax(112px, 1fr));
+        min-width: 854px;
+      }
+      .calendar-cell {
+        min-height: 44px;
+        border-right: 1px solid var(--line);
+        border-bottom: 1px solid var(--line);
+        background: var(--surface);
+      }
+      .calendar-corner,
+      .calendar-day,
+      .calendar-time {
+        position: sticky;
+        z-index: 3;
+        background: var(--surface-strong);
+      }
+      .calendar-corner {
+        top: 0;
+        left: 0;
+        z-index: 5;
+      }
+      .calendar-day {
+        top: 0;
+        min-height: 62px;
+        padding: 10px;
+        display: grid;
+        gap: 2px;
+      }
+      .calendar-day span {
+        color: var(--muted);
+        font-size: 0.78rem;
+        font-weight: 700;
+        text-transform: uppercase;
+      }
+      .calendar-day strong {
+        font-size: 0.95rem;
+      }
+      .calendar-time {
+        left: 0;
+        min-height: 38px;
+        padding: 9px 10px;
+        color: var(--muted);
+        font-size: 0.78rem;
+        text-align: right;
+      }
+      .calendar-slot {
+        width: auto;
+        margin-top: 0;
+        min-height: 38px;
+        padding: 5px 8px;
+        border: 0;
+        border-right: 1px solid var(--line);
+        border-bottom: 1px solid var(--line);
+        border-radius: 0;
+        color: var(--ink);
+        background: var(--surface);
+        text-align: left;
+      }
+      button.calendar-slot:hover {
+        background: var(--surface-soft);
+      }
+      .calendar-slot.busy {
+        display: grid;
+        align-content: start;
+        gap: 2px;
+        color: var(--danger);
+        background: rgba(165, 55, 55, 0.11);
+        box-shadow: inset 3px 0 0 var(--danger);
+      }
+      html[data-theme="dark"] .calendar-slot.busy {
+        background: rgba(241, 141, 141, 0.12);
+      }
+      .calendar-slot.busy strong {
+        font-size: 0.75rem;
+        overflow-wrap: anywhere;
+      }
+      .calendar-slot.busy span {
+        color: var(--muted);
+        font-size: 0.72rem;
+      }
+      .calendar-slot.selected {
+        color: var(--ink);
+        background: rgba(31, 90, 97, 0.16);
+        box-shadow: inset 0 0 0 2px var(--deep);
+      }
+      .scheduler-side {
+        border-bottom: 0;
+        border-left: 1px solid var(--line);
+        padding: 18px;
+        overflow-y: auto;
+        background: var(--surface-strong);
+      }
+      .scheduler-side h3 {
+        margin: 0 0 14px;
+      }
+      .selected-time-box {
+        padding: 12px 14px;
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        background: var(--surface-soft);
+        margin-bottom: 14px;
+      }
+      .selected-time-box strong {
+        display: block;
+        margin-bottom: 4px;
+      }
+      .scheduler-side button:disabled {
+        cursor: not-allowed;
+        opacity: 0.48;
       }
       form {
         margin: 0;
@@ -580,7 +1631,8 @@ def style_block() -> str:
         border: 1px solid var(--line);
         padding: 12px 14px;
         font: inherit;
-        background: rgba(255,255,255,0.88);
+        color: var(--ink);
+        background: var(--field-bg);
       }
       textarea {
         min-height: 96px;
@@ -588,15 +1640,21 @@ def style_block() -> str:
       }
       button {
         cursor: pointer;
-        color: #fff;
-        background: var(--ink);
+        color: var(--primary-button-text);
+        background: var(--primary-button-bg);
         border: none;
       }
       .button-secondary {
-        background: rgba(21, 35, 33, 0.08);
+        background: var(--secondary-button-bg);
         color: var(--ink);
       }
+      .button-danger {
+        color: #fff;
+        background: linear-gradient(140deg, var(--danger), #8e2f2f);
+        box-shadow: 0 10px 22px rgba(165, 55, 55, 0.18);
+      }
       .button-accent {
+        color: #fff;
         background: linear-gradient(140deg, var(--accent), var(--accent-strong));
       }
       .button-link {
@@ -606,7 +1664,7 @@ def style_block() -> str:
         padding: 12px 14px;
         border-radius: 14px;
         border: 1px solid var(--line);
-        background: rgba(255,255,255,0.82);
+        background: var(--link-bg);
       }
       .inline-form {
         display: inline-block;
@@ -617,7 +1675,7 @@ def style_block() -> str:
         padding: 14px 16px;
         border-radius: 18px;
         border: 1px solid var(--line);
-        background: rgba(255,255,255,0.70);
+        background: var(--flash-bg);
       }
       .flash.error { border-color: rgba(165, 55, 55, 0.18); color: var(--danger); }
       .flash.success { border-color: rgba(31, 122, 93, 0.20); color: var(--ok); }
@@ -640,19 +1698,254 @@ def style_block() -> str:
         border-collapse: collapse;
         font-size: 0.95rem;
       }
+      .table-wrap {
+        width: 100%;
+        max-width: 100%;
+        overflow-x: auto;
+        overflow-y: hidden;
+      }
+      .table-wrap .table-lite {
+        min-width: 680px;
+      }
+      .table-lite.pending-table {
+        min-width: 980px;
+        table-layout: fixed;
+      }
+      .table-lite.request-table {
+        min-width: 980px;
+        table-layout: fixed;
+      }
+      .request-table th:nth-child(1),
+      .request-table td:nth-child(1) { width: 18%; }
+      .request-table th:nth-child(2),
+      .request-table td:nth-child(2) { width: 12%; }
+      .request-table th:nth-child(3),
+      .request-table td:nth-child(3) { width: 10%; }
+      .request-table th:nth-child(4),
+      .request-table td:nth-child(4) { width: 17%; }
+      .request-table th:nth-child(5),
+      .request-table td:nth-child(5) { width: 11%; }
+      .request-table th:nth-child(6),
+      .request-table td:nth-child(6) { width: 17%; }
+      .request-table th:nth-child(7),
+      .request-table td:nth-child(7) { width: 15%; }
+      .pending-table th:nth-child(1),
+      .pending-table td:nth-child(1) { width: 18%; }
+      .pending-table th:nth-child(2),
+      .pending-table td:nth-child(2) { width: 14%; }
+      .pending-table th:nth-child(3),
+      .pending-table td:nth-child(3) { width: 9%; }
+      .pending-table th:nth-child(4),
+      .pending-table td:nth-child(4),
+      .pending-table th:nth-child(5),
+      .pending-table td:nth-child(5) { width: 13%; }
+      .pending-table th:nth-child(6),
+      .pending-table td:nth-child(6) { width: 33%; }
       .table-lite th, .table-lite td {
         padding: 12px 10px;
         border-bottom: 1px solid var(--line);
         text-align: left;
         vertical-align: top;
+        overflow-wrap: anywhere;
       }
       .actions {
         display: flex;
         gap: 8px;
+        flex-wrap: wrap;
       }
       .actions button {
         width: auto;
-        min-width: 96px;
+        min-width: 82px;
+        padding: 10px 12px;
+      }
+      .request-edit-form,
+      .review-form {
+        display: grid;
+        gap: 8px;
+      }
+      .request-edit-panel {
+        display: grid;
+        gap: 10px;
+      }
+      .request-edit-panel:not([open]) > .request-edit-form {
+        display: none;
+      }
+      .request-edit-panel > summary {
+        width: max-content;
+        min-width: 82px;
+        margin-top: 0;
+        padding: 10px 14px;
+        border-radius: 14px;
+        color: var(--primary-button-text);
+        background: var(--primary-button-bg);
+        cursor: pointer;
+        list-style: none;
+        text-align: center;
+        font-weight: 700;
+        user-select: none;
+      }
+      .request-edit-panel > summary::-webkit-details-marker {
+        display: none;
+      }
+      .request-edit-panel > summary:focus-visible {
+        outline: 3px solid rgba(134, 208, 213, 0.72);
+        outline-offset: 3px;
+      }
+      .request-edit-panel[open] > summary {
+        color: var(--ink);
+        background: var(--secondary-button-bg);
+      }
+      .request-edit-form label,
+      .review-form label {
+        margin-bottom: 0;
+      }
+      .request-edit-form input,
+      .request-edit-form select,
+      .request-edit-form textarea,
+      .review-form textarea {
+        margin-top: 4px;
+        padding: 9px 10px;
+        border-radius: 12px;
+        font-size: 0.88rem;
+      }
+      .request-edit-form textarea,
+      .review-form textarea {
+        min-height: 64px;
+      }
+      .history-list {
+        display: grid;
+        gap: 10px;
+      }
+      .history-entry {
+        padding: 12px 14px;
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        background: var(--surface-soft);
+      }
+      .history-entry strong,
+      .history-entry span {
+        overflow-wrap: anywhere;
+      }
+      .note-box,
+      .suggestion-list {
+        margin-top: 8px;
+      }
+      .suggestion-list {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      @media (max-width: 720px) {
+        .heatmap {
+          max-height: 520px;
+          padding-right: 4px;
+        }
+        .scheduler-modal {
+          padding: 8px;
+        }
+        .scheduler-shell {
+          width: calc(100vw - 16px);
+          max-height: calc(100vh - 16px);
+          border-radius: 18px;
+        }
+        .scheduler-header,
+        .scheduler-toolbar {
+          padding: 12px 14px;
+        }
+        .scheduler-main {
+          grid-template-columns: 1fr;
+          overflow-y: auto;
+        }
+        .scheduler-grid-wrap {
+          max-height: 430px;
+        }
+        .scheduler-side {
+          border-left: 0;
+          border-top: 1px solid var(--line);
+        }
+        .scheduler-grid {
+          grid-template-columns: 64px repeat(7, minmax(112px, 1fr));
+          min-width: 848px;
+        }
+        .table-wrap {
+          overflow-x: visible;
+        }
+        .table-wrap .table-lite,
+        .table-lite.pending-table {
+          display: block;
+          min-width: 0;
+          width: 100%;
+        }
+        .table-lite thead {
+          display: none;
+        }
+        .table-lite tbody {
+          display: grid;
+          gap: 12px;
+        }
+        .table-lite tr {
+          display: block;
+          padding: 12px 14px;
+          border: 1px solid var(--line);
+          border-radius: 18px;
+          background: var(--surface-soft);
+        }
+        .table-lite td {
+          display: grid;
+          grid-template-columns: minmax(92px, 0.36fr) 1fr;
+          gap: 12px;
+          align-items: start;
+          padding: 8px 0;
+          border-bottom: 1px solid var(--line);
+        }
+        .table-lite td:last-child {
+          border-bottom: 0;
+        }
+        .table-lite td::before {
+          content: attr(data-label);
+          color: var(--muted);
+          font-weight: 700;
+        }
+        .table-lite td[colspan] {
+          display: block;
+        }
+        .table-lite td[colspan]::before {
+          content: "";
+        }
+        .pending-table th:nth-child(1),
+        .pending-table td:nth-child(1),
+        .pending-table th:nth-child(2),
+        .pending-table td:nth-child(2),
+        .pending-table th:nth-child(3),
+        .pending-table td:nth-child(3),
+        .pending-table th:nth-child(4),
+        .pending-table td:nth-child(4),
+        .pending-table th:nth-child(5),
+        .pending-table td:nth-child(5),
+        .pending-table th:nth-child(6),
+        .pending-table td:nth-child(6),
+        .request-table th,
+        .request-table td {
+          width: auto;
+        }
+        .actions {
+          align-items: stretch;
+        }
+        .actions,
+        .inline-form,
+        .actions button,
+        .request-edit-panel > summary {
+          width: 100%;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        html.theme-transition,
+        html.theme-transition *,
+        html.theme-transition *::before,
+        html.theme-transition *::after,
+        .theme-fade-layer {
+          transition: none;
+        }
       }
       @media (max-width: 960px) {
         .hero-grid, .grid-2, .grid-3, .login-cards, .heatmap {
@@ -662,13 +1955,25 @@ def style_block() -> str:
           flex-direction: column;
           align-items: stretch;
         }
+        .topbar-actions {
+          width: 100%;
+          justify-content: center;
+        }
+        .locale-toggle,
+        .theme-toggle {
+          justify-content: center;
+        }
+        .brand-link {
+          width: 100%;
+        }
       }
     </style>
     """
 
 
-def render_layout(title: str, content: str, user: sqlite3.Row | None = None, lang: str = DEFAULT_LANGUAGE) -> str:
+def render_layout(title: str, content: str, user: sqlite3.Row | None = None, lang: str = DEFAULT_LANGUAGE, theme: str = DEFAULT_THEME) -> str:
     home_link = "/dashboard" if user is not None else "/"
+    active_theme = theme if theme in SUPPORTED_THEMES else DEFAULT_THEME
     user_html = ""
     if user is not None:
         user_html = f"""
@@ -686,15 +1991,33 @@ def render_layout(title: str, content: str, user: sqlite3.Row | None = None, lan
         """
 
     locale_links = f"""
-      <div class="locale-toggle">
-        <a href="?lang=en" class="{'active' if lang == 'en' else ''}">EN</a>
-        <span>|</span>
-        <a href="?lang=tr" class="{'active' if lang == 'tr' else ''}">TR</a>
+      <div class="locale-toggle" aria-label="Language">
+        <a href="?lang=en" class="{'active' if lang == 'en' else ''}" aria-label="English">
+          <span class="flag-icon flag-en" aria-hidden="true"></span>
+          <span>EN</span>
+        </a>
+        <span class="divider" aria-hidden="true">|</span>
+        <a href="?lang=tr" class="{'active' if lang == 'tr' else ''}" aria-label="Türkçe">
+          <span class="flag-icon flag-tr" aria-hidden="true"></span>
+          <span>TR</span>
+        </a>
+      </div>
+    """
+    theme_controls = f"""
+      <div class="theme-toggle" aria-label="{h(t('theme_label', lang))}">
+        <button type="button" class="theme-option {'active' if active_theme == 'light' else ''}" data-theme-option="light" aria-pressed="{'true' if active_theme == 'light' else 'false'}">
+          <span class="theme-icon theme-sun" aria-hidden="true"></span>
+          <span>{h(t('theme_light', lang))}</span>
+        </button>
+        <button type="button" class="theme-option {'active' if active_theme == 'dark' else ''}" data-theme-option="dark" aria-pressed="{'true' if active_theme == 'dark' else 'false'}">
+          <span class="theme-icon theme-moon" aria-hidden="true"></span>
+          <span>{h(t('theme_dark', lang))}</span>
+        </button>
       </div>
     """
 
     return f"""<!DOCTYPE html>
-<html lang="{h(lang)}">
+<html lang="{h(lang)}" data-theme="{h(active_theme)}">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -713,13 +2036,393 @@ def render_layout(title: str, content: str, user: sqlite3.Row | None = None, lan
           </div>
         </a>
         {user_html or f'<div class="muted small">{h(t("sqlite_note", lang))}</div>'}
-        {locale_links}
+        <div class="topbar-actions">
+          {locale_links}
+          {theme_controls}
+        </div>
       </section>
       {content}
     </main>
+    <script>
+      (() => {{
+        const root = document.documentElement;
+        const buttons = Array.from(document.querySelectorAll("[data-theme-option]"));
+        let fadeTimer = 0;
+        let transitionTimer = 0;
+
+        const getFadeLayer = () => {{
+          let layer = document.querySelector(".theme-fade-layer");
+          if (!layer) {{
+            layer = document.createElement("div");
+            layer.className = "theme-fade-layer";
+            layer.setAttribute("aria-hidden", "true");
+            document.body.append(layer);
+          }}
+          return layer;
+        }};
+
+        const commitTheme = (theme) => {{
+          root.dataset.theme = theme;
+          document.cookie = "{THEME_COOKIE}=" + theme + "; path=/; max-age=31536000; SameSite=Lax";
+          buttons.forEach((button) => {{
+            const isActive = button.dataset.themeOption === theme;
+            button.classList.toggle("active", isActive);
+            button.setAttribute("aria-pressed", isActive ? "true" : "false");
+          }});
+        }};
+
+        const applyTheme = (theme) => {{
+          if (root.dataset.theme === theme) return;
+          window.clearTimeout(fadeTimer);
+          window.clearTimeout(transitionTimer);
+
+          const layer = getFadeLayer();
+          const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+          layer.style.background = theme === "dark" ? "#05090b" : "#fffaf2";
+
+          if (prefersReducedMotion) {{
+            commitTheme(theme);
+            return;
+          }}
+
+          root.classList.add("theme-transition");
+          layer.classList.add("active");
+          fadeTimer = window.setTimeout(() => {{
+            commitTheme(theme);
+            layer.classList.remove("active");
+          }}, 180);
+          transitionTimer = window.setTimeout(() => {{
+            root.classList.remove("theme-transition");
+          }}, 820);
+        }};
+
+        buttons.forEach((button) => {{
+          button.addEventListener("click", () => applyTheme(button.dataset.themeOption));
+        }});
+
+        document.querySelectorAll("form[data-confirm]").forEach((form) => {{
+          form.addEventListener("submit", (event) => {{
+            const message = form.dataset.confirm;
+            if (message && !window.confirm(message)) {{
+              event.preventDefault();
+            }}
+          }});
+        }});
+      }})();
+    </script>
   </body>
 </html>
 """
+
+
+def room_scheduler_script() -> str:
+    return """
+    <script>
+      (() => {
+        const dataElement = document.getElementById("room-calendar-data");
+        const modal = document.querySelector("[data-room-scheduler]");
+        if (!dataElement || !modal) return;
+
+        const payload = JSON.parse(dataElement.textContent);
+        const labels = payload.labels || {};
+        const locale = payload.lang === "tr" ? "tr-TR" : "en-US";
+        const dayNames = payload.lang === "tr"
+          ? ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Paz"]
+          : ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+        const slotStartHour = 8;
+        const slotEndHour = 20;
+        const slotMinutes = 30;
+
+        const titleElement = modal.querySelector("[data-calendar-title]");
+        const roomMetaElement = modal.querySelector("[data-calendar-room-meta]");
+        const rangeElement = modal.querySelector("[data-calendar-range]");
+        const gridElement = modal.querySelector("[data-calendar-grid]");
+        const selectedElement = modal.querySelector("[data-selected-time]");
+        const statusElement = modal.querySelector("[data-selection-status]");
+        const form = modal.querySelector("[data-calendar-form]");
+        const roomInput = modal.querySelector("[data-calendar-room-input]");
+        const startInput = modal.querySelector("[data-calendar-start-input]");
+        const endInput = modal.querySelector("[data-calendar-end-input]");
+        const submitButton = modal.querySelector("[data-calendar-submit]");
+        const closeButton = modal.querySelector("[data-close-scheduler-main]");
+
+        let activeRoom = null;
+        let weekStart = startOfWeek(new Date());
+        let selection = null;
+
+        function parseLocal(value) {
+          const [datePart, timePart = "00:00:00"] = value.split("T");
+          const [year, month, day] = datePart.split("-").map(Number);
+          const [hour, minute, second = 0] = timePart.split(":").map(Number);
+          return new Date(year, month - 1, day, hour || 0, minute || 0, second || 0);
+        }
+
+        function toInputValue(date) {
+          return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}T${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+        }
+
+        function addDays(date, days) {
+          const next = new Date(date);
+          next.setDate(next.getDate() + days);
+          return next;
+        }
+
+        function addMinutes(date, minutes) {
+          return new Date(date.getTime() + minutes * 60000);
+        }
+
+        function startOfWeek(date) {
+          const next = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+          const jsDay = next.getDay() || 7;
+          next.setDate(next.getDate() - jsDay + 1);
+          next.setHours(0, 0, 0, 0);
+          return next;
+        }
+
+        function dayNumber(date) {
+          return date.getDay() === 0 ? 7 : date.getDay();
+        }
+
+        function daysBetween(a, b) {
+          const first = new Date(a.getFullYear(), a.getMonth(), a.getDate());
+          const second = new Date(b.getFullYear(), b.getMonth(), b.getDate());
+          return Math.round((first - second) / 86400000);
+        }
+
+        function sameTimeOnDay(day, source) {
+          return new Date(day.getFullYear(), day.getMonth(), day.getDate(), source.getHours(), source.getMinutes(), 0, 0);
+        }
+
+        function formatShortDate(date) {
+          return new Intl.DateTimeFormat(locale, { month: "short", day: "numeric" }).format(date);
+        }
+
+        function formatFullDate(date) {
+          return new Intl.DateTimeFormat(locale, { weekday: "short", month: "short", day: "numeric" }).format(date);
+        }
+
+        function formatTime(date) {
+          return new Intl.DateTimeFormat(locale, { hour: "2-digit", minute: "2-digit" }).format(date);
+        }
+
+        function formatRange(start, end) {
+          return `${formatFullDate(start)} · ${formatTime(start)} - ${formatTime(end)}`;
+        }
+
+        function escapeHtml(value) {
+          return String(value)
+            .replaceAll("&", "&amp;")
+            .replaceAll("<", "&lt;")
+            .replaceAll(">", "&gt;")
+            .replaceAll('"', "&quot;")
+            .replaceAll("'", "&#039;");
+        }
+
+        function getRawEventsForRoom(roomId) {
+          return payload.events.filter((event) => Number(event.roomId) === Number(roomId));
+        }
+
+        function expandEventsForWeek(roomId) {
+          const weekEnd = addDays(weekStart, 7);
+          const instances = [];
+
+          getRawEventsForRoom(roomId).forEach((event) => {
+            const baseStart = parseLocal(event.start);
+            const baseEnd = parseLocal(event.end);
+            const duration = baseEnd - baseStart;
+
+            if (event.kind !== "schedule" || event.recurrence === "Once") {
+              if (baseStart < weekEnd && baseEnd > weekStart) {
+                instances.push({ ...event, startDate: baseStart, endDate: baseEnd });
+              }
+              return;
+            }
+
+            for (let index = 0; index < 7; index += 1) {
+              const day = addDays(weekStart, index);
+              if (dayNumber(day) !== Number(event.weekday)) continue;
+              const diff = daysBetween(day, baseStart);
+              if (diff < 0) continue;
+              if (event.recurrence === "Biweekly" && diff % 14 !== 0) continue;
+              const startDate = sameTimeOnDay(day, baseStart);
+              const endDate = new Date(startDate.getTime() + duration);
+              instances.push({ ...event, startDate, endDate });
+            }
+          });
+
+          return instances.sort((a, b) => a.startDate - b.startDate);
+        }
+
+        function eventOverlaps(start, end, event) {
+          return start < event.endDate && end > event.startDate;
+        }
+
+        function selectedOverlaps(start, end) {
+          return selection && start < selection.end && end > selection.start;
+        }
+
+        function rangeHasBusy(start, end) {
+          return expandEventsForWeek(activeRoom.id).some((event) => eventOverlaps(start, end, event));
+        }
+
+        function defaultWeekForRoom(roomId) {
+          const roomEvents = getRawEventsForRoom(roomId);
+          const hasRecurring = roomEvents.some((event) => event.kind === "schedule" && event.recurrence !== "Once");
+          if (hasRecurring) return startOfWeek(new Date());
+          if (roomEvents.length) {
+            return startOfWeek(parseLocal(roomEvents.sort((a, b) => parseLocal(a.start) - parseLocal(b.start))[0].start));
+          }
+          return startOfWeek(new Date());
+        }
+
+        function renderSelection(message) {
+          if (!selection) {
+            selectedElement.textContent = labels.calendarNoSelection;
+            statusElement.textContent = message || "";
+            roomInput.value = activeRoom ? activeRoom.id : "";
+            startInput.value = "";
+            endInput.value = "";
+            submitButton.disabled = true;
+            return;
+          }
+          selectedElement.textContent = formatRange(selection.start, selection.end);
+          statusElement.textContent = message || "";
+          roomInput.value = activeRoom.id;
+          startInput.value = toInputValue(selection.start);
+          endInput.value = toInputValue(selection.end);
+          submitButton.disabled = false;
+        }
+
+        function renderGrid() {
+          if (!activeRoom) return;
+          const weekEnd = addDays(weekStart, 6);
+          const events = expandEventsForWeek(activeRoom.id);
+          rangeElement.textContent = `${labels.week} · ${formatShortDate(weekStart)} - ${formatShortDate(weekEnd)}`;
+          gridElement.innerHTML = "";
+
+          const corner = document.createElement("div");
+          corner.className = "calendar-cell calendar-corner";
+          gridElement.append(corner);
+
+          for (let dayIndex = 0; dayIndex < 7; dayIndex += 1) {
+            const day = addDays(weekStart, dayIndex);
+            const header = document.createElement("div");
+            header.className = "calendar-cell calendar-day";
+            header.innerHTML = `<span>${dayNames[dayIndex]}</span><strong>${formatShortDate(day)}</strong>`;
+            gridElement.append(header);
+          }
+
+          for (let hour = slotStartHour; hour < slotEndHour; hour += 1) {
+            for (let minuteStep = 0; minuteStep < 60; minuteStep += slotMinutes) {
+              const timeDate = new Date(weekStart.getFullYear(), weekStart.getMonth(), weekStart.getDate(), hour, minuteStep, 0, 0);
+              const timeCell = document.createElement("div");
+              timeCell.className = "calendar-cell calendar-time";
+              timeCell.textContent = formatTime(timeDate);
+              gridElement.append(timeCell);
+
+              for (let dayIndex = 0; dayIndex < 7; dayIndex += 1) {
+                const day = addDays(weekStart, dayIndex);
+                const slotStart = new Date(day.getFullYear(), day.getMonth(), day.getDate(), hour, minuteStep, 0, 0);
+                const slotEnd = addMinutes(slotStart, slotMinutes);
+                const busyEvent = events.find((event) => eventOverlaps(slotStart, slotEnd, event));
+                const cell = document.createElement(busyEvent ? "div" : "button");
+                cell.className = "calendar-cell calendar-slot";
+
+                if (busyEvent) {
+                  cell.classList.add("busy");
+                  cell.innerHTML = `<strong>${escapeHtml(busyEvent.label)}</strong><span>${escapeHtml(formatTime(busyEvent.startDate))} - ${escapeHtml(formatTime(busyEvent.endDate))}</span>`;
+                } else {
+                  cell.type = "button";
+                  cell.dataset.start = toInputValue(slotStart);
+                  cell.dataset.end = toInputValue(slotEnd);
+                  cell.setAttribute("aria-label", `${labels.selectTime}: ${formatRange(slotStart, slotEnd)}`);
+                  cell.addEventListener("click", () => selectSlot(slotStart, slotEnd));
+                }
+
+                if (!busyEvent && selectedOverlaps(slotStart, slotEnd)) {
+                  cell.classList.add("selected");
+                }
+                gridElement.append(cell);
+              }
+            }
+          }
+        }
+
+        function selectSlot(slotStart, slotEnd) {
+          if (!selection || slotStart < selection.start) {
+            const next = { start: slotStart, end: slotEnd };
+            if (rangeHasBusy(next.start, next.end)) {
+              renderSelection(labels.calendarUnavailableRange);
+              return;
+            }
+            selection = next;
+            renderGrid();
+            renderSelection();
+            return;
+          }
+
+          const next = { start: selection.start, end: slotEnd };
+          if (rangeHasBusy(next.start, next.end)) {
+            renderSelection(labels.calendarUnavailableRange);
+            return;
+          }
+          selection = next;
+          renderGrid();
+          renderSelection();
+        }
+
+        function openScheduler(roomId) {
+          activeRoom = payload.rooms.find((room) => Number(room.id) === Number(roomId));
+          if (!activeRoom) return;
+          weekStart = defaultWeekForRoom(activeRoom.id);
+          selection = null;
+          titleElement.textContent = `${activeRoom.code} · ${labels.roomCalendar}`;
+          roomMetaElement.textContent = `${labels.blockLabel} ${activeRoom.block} · ${labels.floor} ${activeRoom.floor} · ${activeRoom.capacity} ${labels.seats}`;
+          renderGrid();
+          renderSelection();
+          modal.hidden = false;
+          modal.setAttribute("aria-hidden", "false");
+          document.body.classList.add("scheduler-open");
+          closeButton.focus();
+        }
+
+        function closeScheduler() {
+          modal.hidden = true;
+          modal.setAttribute("aria-hidden", "true");
+          document.body.classList.remove("scheduler-open");
+        }
+
+        document.querySelectorAll("[data-room-card]").forEach((card) => {
+          card.addEventListener("click", () => openScheduler(card.dataset.roomId));
+        });
+
+        modal.querySelectorAll("[data-close-scheduler]").forEach((button) => {
+          button.addEventListener("click", closeScheduler);
+        });
+        modal.querySelector("[data-calendar-prev]").addEventListener("click", () => {
+          weekStart = addDays(weekStart, -7);
+          selection = null;
+          renderGrid();
+          renderSelection();
+        });
+        modal.querySelector("[data-calendar-next]").addEventListener("click", () => {
+          weekStart = addDays(weekStart, 7);
+          selection = null;
+          renderGrid();
+          renderSelection();
+        });
+        modal.querySelector("[data-calendar-today]").addEventListener("click", () => {
+          weekStart = startOfWeek(new Date());
+          selection = null;
+          renderGrid();
+          renderSelection();
+        });
+        document.addEventListener("keydown", (event) => {
+          if (event.key === "Escape" && !modal.hidden) closeScheduler();
+        });
+      })();
+    </script>
+    """
 
 
 def occupancy_percentage(row: sqlite3.Row) -> float:
@@ -762,11 +2465,8 @@ def get_current_user(handler: BaseHTTPRequestHandler) -> sqlite3.Row | None:
         ).fetchone()
 
 
-def signin_page(message: str = "", error: bool = False, lang: str = DEFAULT_LANGUAGE) -> str:
-    flash = ""
-    if message:
-        flash_class = "error" if error else "success"
-        flash = f'<div class="flash {flash_class}">{h(message)}</div>'
+def signin_page(message: str = "", error: bool = False, lang: str = DEFAULT_LANGUAGE, theme: str = DEFAULT_THEME) -> str:
+    flash = render_flash(message, error, lang)
 
     content = f"""
     <section class="hero">
@@ -794,19 +2494,16 @@ def signin_page(message: str = "", error: bool = False, lang: str = DEFAULT_LANG
       </div>
     </section>
     """
-    return render_layout(t('sign_in_title', lang), content, None, lang)
+    return render_layout(t('sign_in_title', lang), content, None, lang, theme)
 
 
-def signup_page(message: str = "", error: bool = False, lang: str = DEFAULT_LANGUAGE) -> str:
+def signup_page(message: str = "", error: bool = False, lang: str = DEFAULT_LANGUAGE, theme: str = DEFAULT_THEME) -> str:
     with get_connection() as conn:
         departments = conn.execute(
             "SELECT department_id, department_name FROM Departments ORDER BY department_name"
         ).fetchall()
 
-    flash = ""
-    if message:
-        flash_class = "error" if error else "success"
-        flash = f'<div class="flash {flash_class}">{h(message)}</div>'
+    flash = render_flash(message, error, lang)
 
     dept_options = "".join(
         f'<option value="{row["department_id"]}">{h(row["department_name"])}</option>'
@@ -849,10 +2546,10 @@ def signup_page(message: str = "", error: bool = False, lang: str = DEFAULT_LANG
       </div>
     </section>
     """
-    return render_layout(t('create_account_title', lang), content, None, lang)
+    return render_layout(t('create_account_title', lang), content, None, lang, theme)
 
 
-def student_dashboard(user: sqlite3.Row, params: dict[str, list[str]], message: str = "", error: bool = False, lang: str = DEFAULT_LANGUAGE) -> str:
+def student_dashboard(user: sqlite3.Row, params: dict[str, list[str]], message: str = "", error: bool = False, lang: str = DEFAULT_LANGUAGE, theme: str = DEFAULT_THEME) -> str:
     projector = sql_bool(params.get("projector", [""])[0])
     smart_board = sql_bool(params.get("smart_board", [""])[0])
     min_outlets = params.get("min_outlets", [""])[0]
@@ -889,9 +2586,12 @@ def student_dashboard(user: sqlite3.Row, params: dict[str, list[str]], message: 
         requests = conn.execute(
             """
             SELECT er.request_id, er.event_title, er.event_type, er.status,
-                   er.requested_start, er.requested_end, c.room_code
+                   er.room_id, er.requested_start, er.requested_end, er.request_note,
+                   er.rejection_reason, er.decision_note, er.decision_at,
+                   c.room_code, reviewer.name AS reviewer_name
             FROM Event_Requests er
             JOIN Classrooms c ON c.room_id = er.room_id
+            LEFT JOIN Users reviewer ON reviewer.user_id = er.approved_by
             WHERE er.requester_id = ?
             ORDER BY datetime(er.requested_start) DESC
             """,
@@ -900,15 +2600,40 @@ def student_dashboard(user: sqlite3.Row, params: dict[str, list[str]], message: 
         room_options = conn.execute(
             "SELECT room_id, room_code FROM Classrooms WHERE is_active = 1 ORDER BY room_code"
         ).fetchall()
+        history = conn.execute(
+            """
+            SELECT rh.action, rh.previous_status, rh.new_status, rh.action_note, rh.created_at,
+                   er.event_title, actor.name AS actor_name
+            FROM Request_History rh
+            JOIN Event_Requests er ON er.request_id = rh.request_id
+            JOIN Users actor ON actor.user_id = rh.actor_id
+            WHERE er.requester_id = ?
+            ORDER BY datetime(rh.created_at) DESC, rh.history_id DESC
+            LIMIT 10
+            """,
+            (user["user_id"],),
+        ).fetchall()
+        calendar_schedules = conn.execute(
+            """
+            SELECT room_id, schedule_type, title, start_at, end_at, weekday, recurrence_pattern
+            FROM Academic_Schedules
+            ORDER BY datetime(start_at)
+            """
+        ).fetchall()
+        calendar_requests = conn.execute(
+            """
+            SELECT room_id, event_type, status, requested_start, requested_end
+            FROM Event_Requests
+            WHERE status IN ('Pending', 'Approved')
+            ORDER BY datetime(requested_start)
+            """
+        ).fetchall()
 
     pending_count = sum(1 for row in requests if row["status"] == "Pending")
     approved_count = sum(1 for row in requests if row["status"] == "Approved")
     available_now = sum(1 for row in rooms if row["live_status"] in ("Available", "Reserved"))
 
-    flash = ""
-    if message:
-        flash_class = "error" if error else "success"
-        flash = f'<div class="flash {flash_class}">{h(message)}</div>'
+    flash = render_flash(message, error, lang)
 
     room_cards = []
     for row in rooms:
@@ -918,10 +2643,10 @@ def student_dashboard(user: sqlite3.Row, params: dict[str, list[str]], message: 
         status_text = translate_status(row["live_status"] or "Unknown", lang)
         room_cards.append(
             f"""
-            <div class="room-card {tag_class}">
+            <button type="button" class="room-card room-card-button {tag_class}" data-room-card data-room-id="{h(row["room_id"])}" data-room-code="{h(row["room_code"])}" aria-label="{h(t('open_calendar', lang))}: {h(row["room_code"])}">
               <div class="room-head">
                 <strong>{h(row["room_code"])}</strong>
-                <span>{percent}% full</span>
+                <span>{h(t('percent_full', lang).format(percent=percent))}</span>
               </div>
               <div class="small">{h(t('block_label', lang))} {h(row["block"])} • {h(t('floor', lang))} {h(row["floor"])} • {h(row["capacity"])} {h(t('seats', lang))}</div>
               <div class="room-tags">
@@ -930,7 +2655,7 @@ def student_dashboard(user: sqlite3.Row, params: dict[str, list[str]], message: 
                 <span>{h(t('minimum_power_outlets', lang))}: {h(row["power_outlets"])}</span>
                 <span>{h(t('smart_board_label', lang))}: {h(yes_no(bool(row['smart_board']), lang))}</span>
               </div>
-            </div>
+            </button>
             """
         )
 
@@ -939,27 +2664,152 @@ def student_dashboard(user: sqlite3.Row, params: dict[str, list[str]], message: 
             f'<div class="card"><h3>{h(t("no_rooms_match", lang))}</h3><p class="muted">{h(t("try_removing_constraints", lang))}</p></div>'
         )
 
-    request_rows = "".join(
-        f"""
-        <tr>
-          <td>{h(row["event_title"])}</td>
-          <td>{h(translate_event_type(row["event_type"], lang))}</td>
-          <td>{h(row["room_code"])}</td>
-          <td>{h(row["requested_start"])}</td>
-          <td><span class="badge {'ok' if row['status'] == 'Approved' else 'warn' if row['status'] == 'Pending' else 'danger'}">{h(translate_status(row['status'], lang))}</span></td>
-        </tr>
-        """
-        for row in requests
-    ) or f'<tr><td colspan="5" class="muted">{h(t("no_requests_yet", lang))}</td></tr>'
+    request_rows = []
+    for row in requests:
+        status_class = "ok" if row["status"] == "Approved" else "warn" if row["status"] == "Pending" else "info" if row["status"] == "Cancelled" else "danger"
+        note_parts = []
+        if row["request_note"]:
+            note_parts.append(f'<div class="small muted"><strong>{h(t("note", lang))}:</strong> {h(row["request_note"])}</div>')
+        decision_note = row["decision_note"] or row["rejection_reason"]
+        if decision_note:
+            note_parts.append(f'<div class="small muted"><strong>{h(t("decision_note", lang))}:</strong> {h(decision_note)}</div>')
+        if row["reviewer_name"] and row["decision_at"]:
+            note_parts.append(f'<div class="small muted">{h(t("created_by", lang).format(actor=row["reviewer_name"]))} • {h(format_datetime(row["decision_at"], lang))}</div>')
+        details_html = "".join(note_parts) or '<span class="muted">-</span>'
+        actions_html = '<span class="muted">-</span>'
+        if row["status"] == "Pending":
+            actions_html = f"""
+              <details class="request-edit-panel">
+                <summary>{h(t('edit', lang))}</summary>
+                <form method="post" action="/requests/update" class="request-edit-form" data-confirm="{h(t('confirm_update_request', lang))}">
+                  <input type="hidden" name="request_id" value="{h(row["request_id"])}">
+                  <label>{h(t('title', lang))}
+                    <input type="text" name="event_title" value="{h(row["event_title"])}" required>
+                  </label>
+                  <label>{h(t('type', lang))}
+                    <select name="event_type" required>
+                      {event_type_options_html(row["event_type"], lang)}
+                    </select>
+                  </label>
+                  <label>{h(t('room', lang))}
+                    <select name="room_id" required>
+                      {room_options_html(room_options, row["room_id"])}
+                    </select>
+                  </label>
+                  <label>{h(t('start', lang))}
+                    <input type="datetime-local" name="requested_start" value="{h(datetime_local_value(row["requested_start"]))}" required>
+                  </label>
+                  <label>{h(t('end', lang))}
+                    <input type="datetime-local" name="requested_end" value="{h(datetime_local_value(row["requested_end"]))}" required>
+                  </label>
+                  <label>{h(t('note', lang))}
+                    <textarea name="request_note">{h(row["request_note"] or "")}</textarea>
+                  </label>
+                  <div class="actions">
+                    <button type="submit">{h(t('update_request', lang))}</button>
+                  </div>
+                </form>
+              </details>
+              <form method="post" action="/requests/cancel" class="inline-form spaced" data-confirm="{h(t('confirm_cancel_request', lang))}">
+                <input type="hidden" name="request_id" value="{h(row["request_id"])}">
+                <button class="button-danger" type="submit">{h(t('cancel_request', lang))}</button>
+              </form>
+            """
+        request_rows.append(
+            f"""
+            <tr>
+              <td data-label="{h(t('title', lang))}">{h(row["event_title"])}</td>
+              <td data-label="{h(t('type', lang))}">{h(translate_event_type(row["event_type"], lang))}</td>
+              <td data-label="{h(t('room', lang))}">{h(row["room_code"])}</td>
+              <td data-label="{h(t('time', lang))}">{h(format_datetime(row["requested_start"], lang))}<br><span class="muted small">{h(format_datetime(row["requested_end"], lang))}</span></td>
+              <td data-label="{h(t('status', lang))}"><span class="badge {status_class}">{h(translate_status(row['status'], lang))}</span></td>
+              <td data-label="{h(t('details', lang))}">{details_html}</td>
+              <td data-label="{h(t('actions', lang))}">{actions_html}</td>
+            </tr>
+            """
+        )
 
-    room_select = "".join(
-        f'<option value="{h(room["room_id"])}">{h(room["room_code"])}</option>'
-        for room in room_options
-    )
+    request_rows_html = "".join(request_rows) or f'<tr><td colspan="7" class="muted">{h(t("no_requests_yet", lang))}</td></tr>'
+
+    history_rows = "".join(
+        f"""
+        <div class="history-entry">
+          <div class="stat-row">
+            <strong>{h(row["event_title"])}</strong>
+            <span class="badge info">{h(translate_history_action(row["action"], lang))}</span>
+          </div>
+          <div class="small muted">{h(t("created_by", lang).format(actor=row["actor_name"]))} • {h(format_datetime(row["created_at"], lang))}</div>
+          {f'<div class="small muted note-box">{h(row["action_note"])}</div>' if row["action_note"] else ''}
+        </div>
+        """
+        for row in history
+    ) or f'<div class="history-entry muted">{h(t("no_history_yet", lang))}</div>'
+
+    room_select = room_options_html(room_options)
     block_options = "".join(
         f'<option value="{h(row["block"])}" {"selected" if row["block"] == block else ""}>{h(row["block"])}</option>'
         for row in blocks
     )
+    calendar_payload = {
+        "lang": lang,
+        "rooms": [
+            {
+                "id": row["room_id"],
+                "code": row["room_code"],
+                "block": row["block"],
+                "floor": row["floor"],
+                "capacity": row["capacity"],
+            }
+            for row in rooms
+        ],
+        "events": [
+            {
+                "roomId": row["room_id"],
+                "kind": "schedule",
+                "label": t("calendar_busy_academic", lang),
+                "start": datetime_iso_value(row["start_at"]),
+                "end": datetime_iso_value(row["end_at"]),
+                "weekday": row["weekday"],
+                "recurrence": row["recurrence_pattern"],
+            }
+            for row in calendar_schedules
+        ]
+        + [
+            {
+                "roomId": row["room_id"],
+                "kind": "request",
+                "label": f"{t('calendar_busy_request', lang)} · {t('calendar_pending' if row['status'] == 'Pending' else 'calendar_approved', lang)}",
+                "start": datetime_iso_value(row["requested_start"]),
+                "end": datetime_iso_value(row["requested_end"]),
+                "weekday": None,
+                "recurrence": "Once",
+            }
+            for row in calendar_requests
+        ],
+        "eventTypes": [
+            {"value": event_type, "label": translate_event_type(event_type, lang)}
+            for event_type in ("Workshop", "Club", "Makeup", "Exam", "Seminar")
+        ],
+        "labels": {
+            "roomCalendar": t("room_calendar", lang),
+            "week": t("week", lang),
+            "previousWeek": t("previous_week", lang),
+            "nextWeek": t("next_week", lang),
+            "today": t("today", lang),
+            "close": t("close", lang),
+            "busy": t("busy", lang),
+            "selectedTime": t("selected_time", lang),
+            "selectTime": t("select_time", lang),
+            "reservationDetails": t("reservation_details", lang),
+            "reserveSelectedTime": t("reserve_selected_time", lang),
+            "calendarUnavailableRange": t("calendar_unavailable_range", lang),
+            "calendarNoSelection": t("calendar_no_selection", lang),
+            "blockLabel": t("block_label", lang),
+            "floor": t("floor", lang),
+            "seats": t("seats", lang),
+        },
+    }
+    calendar_payload_json = json.dumps(calendar_payload, ensure_ascii=False).replace("</", "<\\/")
 
     content = f"""
     <section class="hero">
@@ -1062,11 +2912,7 @@ def student_dashboard(user: sqlite3.Row, params: dict[str, list[str]], message: 
           </label>
           <label>{h(t('type', lang))}
             <select name="event_type" required>
-              <option value="Workshop">{h(t('event_type_workshop', lang))}</option>
-              <option value="Club">{h(t('event_type_club', lang))}</option>
-              <option value="Makeup">{h(t('event_type_makeup', lang))}</option>
-              <option value="Exam">{h(t('event_type_exam', lang))}</option>
-              <option value="Seminar">{h(t('event_type_seminar', lang))}</option>
+              {event_type_options_html("Workshop", lang)}
             </select>
           </label>
           <label>{h(t('start', lang))}
@@ -1085,26 +2931,93 @@ def student_dashboard(user: sqlite3.Row, params: dict[str, list[str]], message: 
       </aside>
     </section>
 
+    <script type="application/json" id="room-calendar-data">{calendar_payload_json}</script>
+    <div class="scheduler-modal" data-room-scheduler hidden aria-hidden="true">
+      <button type="button" class="scheduler-backdrop" data-close-scheduler aria-label="{h(t('close', lang))}"></button>
+      <section class="scheduler-shell" role="dialog" aria-modal="true" aria-labelledby="room-calendar-title">
+        <header class="scheduler-header">
+          <div>
+            <div class="eyebrow">{h(t('room_calendar', lang))}</div>
+            <h2 id="room-calendar-title" data-calendar-title>{h(t('room_calendar', lang))}</h2>
+            <div class="small muted" data-calendar-room-meta></div>
+          </div>
+          <button type="button" class="icon-button" data-close-scheduler data-close-scheduler-main aria-label="{h(t('close', lang))}">×</button>
+        </header>
+        <div class="scheduler-toolbar">
+          <div class="scheduler-toolbar-group">
+            <button type="button" class="button-secondary" data-calendar-prev aria-label="{h(t('previous_week', lang))}">‹</button>
+            <button type="button" class="button-secondary" data-calendar-today>{h(t('today', lang))}</button>
+            <button type="button" class="button-secondary" data-calendar-next aria-label="{h(t('next_week', lang))}">›</button>
+            <span class="scheduler-range" data-calendar-range></span>
+          </div>
+          <div class="scheduler-legend small muted">
+            <span><i class="legend-dot busy"></i> {h(t('busy', lang))}</span>
+            <span><i class="legend-dot selected"></i> {h(t('selected_time', lang))}</span>
+          </div>
+        </div>
+        <div class="scheduler-main">
+          <div class="scheduler-grid-wrap">
+            <div class="scheduler-grid" data-calendar-grid></div>
+          </div>
+          <aside class="scheduler-side">
+            <h3>{h(t('reservation_details', lang))}</h3>
+            <div class="selected-time-box">
+              <strong>{h(t('selected_time', lang))}</strong>
+              <div class="small" data-selected-time>{h(t('calendar_no_selection', lang))}</div>
+              <div class="small muted" data-selection-status></div>
+            </div>
+            <form method="post" action="/requests/new" data-calendar-form>
+              <input type="hidden" name="room_id" data-calendar-room-input>
+              <input type="hidden" name="requested_start" data-calendar-start-input>
+              <input type="hidden" name="requested_end" data-calendar-end-input>
+              <label>{h(t('title', lang))}
+                <input type="text" name="event_title" placeholder="{h(t('event_title_placeholder', lang))}" required>
+              </label>
+              <label>{h(t('type', lang))}
+                <select name="event_type" required>
+                  {event_type_options_html("Workshop", lang)}
+                </select>
+              </label>
+              <label>{h(t('note', lang))}
+                <textarea name="request_note" placeholder="{h(t('request_note_hint', lang))}"></textarea>
+              </label>
+              <button class="button-accent" type="submit" data-calendar-submit disabled>{h(t('reserve_selected_time', lang))}</button>
+            </form>
+          </aside>
+        </div>
+      </section>
+    </div>
+    {room_scheduler_script()}
+
     <section class="card spaced">
       <h3>{h(t('my_requests', lang))}</h3>
-      <table class="table-lite">
-        <thead>
-          <tr>
-            <th>{h(t('title', lang))}</th>
-            <th>{h(t('type', lang))}</th>
-            <th>{h(t('room', lang))}</th>
-            <th>{h(t('start', lang))}</th>
-            <th>{h(t('status', lang))}</th>
-          </tr>
-        </thead>
-        <tbody>{request_rows}</tbody>
-      </table>
+      <div class="table-wrap">
+        <table class="table-lite request-table">
+          <thead>
+            <tr>
+              <th>{h(t('title', lang))}</th>
+              <th>{h(t('type', lang))}</th>
+              <th>{h(t('room', lang))}</th>
+              <th>{h(t('time', lang))}</th>
+              <th>{h(t('status', lang))}</th>
+              <th>{h(t('details', lang))}</th>
+              <th>{h(t('actions', lang))}</th>
+            </tr>
+          </thead>
+          <tbody>{request_rows_html}</tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card spaced">
+      <h3>{h(t('request_history', lang))}</h3>
+      <div class="history-list">{history_rows}</div>
     </section>
     """
-    return render_layout(t('student_dashboard', lang), content, user, lang)
+    return render_layout(t('student_dashboard', lang), content, user, lang, theme)
 
 
-def academic_dashboard(user: sqlite3.Row, message: str = "", error: bool = False, lang: str = DEFAULT_LANGUAGE) -> str:
+def academic_dashboard(user: sqlite3.Row, message: str = "", error: bool = False, lang: str = DEFAULT_LANGUAGE, theme: str = DEFAULT_THEME) -> str:
     with get_connection() as conn:
         my_schedule = conn.execute(
             """
@@ -1126,7 +3039,7 @@ def academic_dashboard(user: sqlite3.Row, message: str = "", error: bool = False
         pending = conn.execute(
             """
             SELECT er.request_id, er.event_title, er.event_type, er.requested_start, er.requested_end,
-                   c.room_code, u.name AS requester_name
+                   er.room_id, er.request_note, c.room_code, u.name AS requester_name
             FROM Event_Requests er
             JOIN Classrooms c ON c.room_id = er.room_id
             JOIN Users u ON u.user_id = er.requester_id
@@ -1140,31 +3053,70 @@ def academic_dashboard(user: sqlite3.Row, message: str = "", error: bool = False
             FROM Event_Requests er
             JOIN Academic_Schedules s
               ON s.room_id = er.room_id
-             AND datetime(er.requested_start) < datetime(s.end_at)
-             AND datetime(er.requested_end) > datetime(s.start_at)
+             AND (
+                (
+                  date(er.requested_start) = date(s.start_at)
+                  AND datetime(er.requested_start) < datetime(s.end_at)
+                  AND datetime(er.requested_end) > datetime(s.start_at)
+                )
+                OR (
+                  s.recurrence_pattern IN ('Weekly', 'Biweekly')
+                  AND (
+                    CASE strftime('%w', er.requested_start)
+                      WHEN '0' THEN 7
+                      ELSE CAST(strftime('%w', er.requested_start) AS INTEGER)
+                    END
+                  ) = s.weekday
+                  AND date(er.requested_start) >= date(s.start_at)
+                  AND time(er.requested_start) < time(s.end_at)
+                  AND time(er.requested_end) > time(s.start_at)
+                  AND (
+                    s.recurrence_pattern = 'Weekly'
+                    OR ABS(CAST(julianday(date(er.requested_start)) - julianday(date(s.start_at)) AS INTEGER)) % 14 = 0
+                  )
+                )
+             )
             JOIN Classrooms c ON c.room_id = er.room_id
             WHERE er.status IN ('Pending', 'Approved')
             ORDER BY datetime(er.requested_start)
             """
         ).fetchall()
+        history = conn.execute(
+            """
+            SELECT rh.action, rh.previous_status, rh.new_status, rh.action_note, rh.created_at,
+                   er.event_title, actor.name AS actor_name
+            FROM Request_History rh
+            JOIN Event_Requests er ON er.request_id = rh.request_id
+            JOIN Users actor ON actor.user_id = rh.actor_id
+            ORDER BY datetime(rh.created_at) DESC, rh.history_id DESC
+            LIMIT 12
+            """
+        ).fetchall()
+        pending_alternatives = {
+            row["request_id"]: find_alternative_rooms(
+                conn,
+                row["requested_start"],
+                row["requested_end"],
+                row["room_id"],
+                row["request_id"],
+            )
+            for row in pending
+        }
 
-    flash = ""
-    if message:
-        flash_class = "error" if error else "success"
-        flash = f'<div class="flash {flash_class}">{h(message)}</div>'
+    flash = render_flash(message, error, lang)
 
     schedule_rows = "".join(
         f"""
         <div class="list-row">
           <div>
             <strong>{h(row["title"])}</strong>
-            <div class="small muted">{h(row["schedule_type"])} • {h(row["room_code"])}</div>
+            <div class="small muted">{h(translate_schedule_type(row["schedule_type"], lang))} • {h(row["room_code"])}</div>
           </div>
-          <span class="badge info">{h(row["start_at"])}</span>
+          <span class="badge info">{h(format_datetime(row["start_at"], lang))}</span>
         </div>
         """
         for row in my_schedule
-    ) or '<div class="list-row muted">No schedule assigned to this academic yet.</div>'
+    ) or f'<div class="list-row muted">{h(t("no_schedule_assigned", lang))}</div>'
 
     coordination_rows = "".join(
         f"""
@@ -1173,35 +3125,45 @@ def academic_dashboard(user: sqlite3.Row, message: str = "", error: bool = False
             <strong>{h(row["title"])}</strong>
             <span class="badge {'ok' if row['overlapping_event_requests'] == 0 else 'warn'}">{h(row["room_code"])}</span>
           </div>
-          <div class="small muted">Occupancy trend: {h(row["prior_week_occupancy_rate"])}% • Overlapping requests: {h(row["overlapping_event_requests"])}</div>
+          <div class="small muted">{h(t('occupancy_trend', lang))}: {h(row["prior_week_occupancy_rate"])}% • {h(t('overlapping_requests', lang))}: {h(row["overlapping_event_requests"])}</div>
         </div>
         """
         for row in coordination
-    ) or '<div class="list-row muted">No exam records are available.</div>'
+    ) or f'<div class="list-row muted">{h(t("no_exam_records", lang))}</div>'
 
     pending_rows = []
     for row in pending:
+        alternatives = pending_alternatives.get(row["request_id"], [])
+        alternative_html = ""
+        if alternatives:
+            alternative_html = f"""
+              <div class="small muted suggestion-list">
+                <strong>{h(t('alternative_rooms', lang))}:</strong>
+                {"".join(f'<span class="badge info">{h(alt["room_code"])}</span>' for alt in alternatives)}
+              </div>
+            """
+        note_html = f'<div class="small muted note-box">{h(row["request_note"])}</div>' if row["request_note"] else ""
         pending_rows.append(
             f"""
             <tr>
-              <td>{h(row["event_title"])}</td>
-              <td>{h(row["requester_name"])}</td>
-              <td>{h(row["room_code"])}</td>
-              <td>{h(row["requested_start"])}</td>
-              <td>{h(row["requested_end"])}</td>
-              <td>
-                <div class="actions">
-                  <form method="post" action="/requests/review" class="inline-form">
-                    <input type="hidden" name="request_id" value="{h(row["request_id"])}">
-                    <input type="hidden" name="decision" value="Approved">
-                    <button type="submit">Approve</button>
-                  </form>
-                  <form method="post" action="/requests/review" class="inline-form">
-                    <input type="hidden" name="request_id" value="{h(row["request_id"])}">
-                    <input type="hidden" name="decision" value="Rejected">
-                    <button class="button-secondary" type="submit">Reject</button>
-                  </form>
-                </div>
+              <td data-label="{h(t('title', lang))}">{h(row["event_title"])}</td>
+              <td data-label="{h(t('requester', lang))}">{h(row["requester_name"])}</td>
+              <td data-label="{h(t('room', lang))}">{h(row["room_code"])}</td>
+              <td data-label="{h(t('start', lang))}">{h(format_datetime(row["requested_start"], lang))}</td>
+              <td data-label="{h(t('end', lang))}">{h(format_datetime(row["requested_end"], lang))}</td>
+              <td data-label="{h(t('decision', lang))}">
+                {note_html}
+                {alternative_html}
+                <form method="post" action="/requests/review" class="review-form">
+                  <input type="hidden" name="request_id" value="{h(row["request_id"])}">
+                  <label>{h(t('review_note', lang))}
+                    <textarea name="decision_note" placeholder="{h(t('review_note_hint', lang))}"></textarea>
+                  </label>
+                  <div class="actions">
+                    <button type="submit" name="decision" value="Approved">{h(t('approve', lang))}</button>
+                    <button class="button-secondary" type="submit" name="decision" value="Rejected">{h(t('reject', lang))}</button>
+                  </div>
+                </form>
               </td>
             </tr>
             """
@@ -1212,13 +3174,27 @@ def academic_dashboard(user: sqlite3.Row, message: str = "", error: bool = False
         <div class="list-row">
           <div>
             <strong>{h(row["event_title"])}</strong>
-            <div class="small muted">{h(row["room_code"])} overlaps with {h(row["schedule_title"])}</div>
+            <div class="small muted">{h(t('overlaps_with', lang).format(room=row["room_code"], schedule=row["schedule_title"]))}</div>
           </div>
-          <span class="badge danger">Conflict</span>
+          <span class="badge danger">{h(t('conflict', lang))}</span>
         </div>
         """
         for row in conflict_rows
-    ) or '<div class="list-row"><div><strong>Current state</strong><div class="small muted">No active conflict is detected in pending or approved requests.</div></div><span class="badge ok">Clear</span></div>'
+    ) or f'<div class="list-row"><div><strong>{h(t("current_state", lang))}</strong><div class="small muted">{h(t("no_active_conflict", lang))}</div></div><span class="badge ok">{h(t("clear", lang))}</span></div>'
+
+    history_rows = "".join(
+        f"""
+        <div class="history-entry">
+          <div class="stat-row">
+            <strong>{h(row["event_title"])}</strong>
+            <span class="badge info">{h(translate_history_action(row["action"], lang))}</span>
+          </div>
+          <div class="small muted">{h(t("created_by", lang).format(actor=row["actor_name"]))} • {h(format_datetime(row["created_at"], lang))}</div>
+          {f'<div class="small muted note-box">{h(row["action_note"])}</div>' if row["action_note"] else ''}
+        </div>
+        """
+        for row in history
+    ) or f'<div class="history-entry muted">{h(t("no_history_yet", lang))}</div>'
 
     content = f"""
     <section class="hero">
@@ -1267,29 +3243,36 @@ def academic_dashboard(user: sqlite3.Row, message: str = "", error: bool = False
     <section class="grid-2 spaced">
       <article class="card">
         <h3>{h(t('pending_requests_title', lang))}</h3>
-        <table class="table-lite">
-          <thead>
-            <tr>
-              <th>{h(t('title', lang))}</th>
-              <th>{h(t('requester', lang))}</th>
-              <th>{h(t('room', lang))}</th>
-              <th>{h(t('start', lang))}</th>
-              <th>{h(t('end', lang))}</th>
-              <th>{h(t('decision', lang))}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {"".join(pending_rows) or f'<tr><td colspan="6" class="muted">{h(t("no_pending_requests", lang))}</td></tr>'}
-          </tbody>
-        </table>
+        <div class="table-wrap">
+          <table class="table-lite pending-table">
+            <thead>
+              <tr>
+                <th>{h(t('title', lang))}</th>
+                <th>{h(t('requester', lang))}</th>
+                <th>{h(t('room', lang))}</th>
+                <th>{h(t('start', lang))}</th>
+                <th>{h(t('end', lang))}</th>
+                <th>{h(t('decision', lang))}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {"".join(pending_rows) or f'<tr><td colspan="6" class="muted">{h(t("no_pending_requests", lang))}</td></tr>'}
+            </tbody>
+          </table>
+        </div>
       </article>
       <aside class="card">
         <h3>{h(t('conflict_detection_feed', lang))}</h3>
         <div class="stats">{conflict_list}</div>
       </aside>
     </section>
+
+    <section class="card spaced">
+      <h3>{h(t('request_history', lang))}</h3>
+      <div class="history-list">{history_rows}</div>
+    </section>
     """
-    return render_layout(t('academic_dashboard', lang), content, user, lang)
+    return render_layout(t('academic_dashboard', lang), content, user, lang, theme)
 
 
 class KMFHandler(BaseHTTPRequestHandler):
@@ -1298,6 +3281,7 @@ class KMFHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
         lang = get_language(self, params) or DEFAULT_LANGUAGE
+        theme = get_theme(self, params)
         lang_cookie = None
         if params.get("lang", [""])[0].lower() in SUPPORTED_LANGUAGES:
             lang_cookie = build_language_cookie(lang)
@@ -1308,21 +3292,21 @@ class KMFHandler(BaseHTTPRequestHandler):
             if user is not None:
                 self.redirect("/dashboard", cookies_header=lang_cookie)
                 return
-            self.respond_html(signin_page(params.get("message", [""])[0], params.get("error", ["0"])[0] == "1", lang), cookies_header=lang_cookie)
+            self.respond_html(signin_page(params.get("message", [""])[0], params.get("error", ["0"])[0] == "1", lang, theme), cookies_header=lang_cookie)
             return
 
         if parsed.path == "/signin":
             if user is not None:
                 self.redirect("/dashboard", cookies_header=lang_cookie)
                 return
-            self.respond_html(signin_page(params.get("message", [""])[0], params.get("error", ["0"])[0] == "1", lang), cookies_header=lang_cookie)
+            self.respond_html(signin_page(params.get("message", [""])[0], params.get("error", ["0"])[0] == "1", lang, theme), cookies_header=lang_cookie)
             return
 
         if parsed.path == "/signup":
             if user is not None:
                 self.redirect("/dashboard", cookies_header=lang_cookie)
                 return
-            self.respond_html(signup_page(params.get("message", [""])[0], params.get("error", ["0"])[0] == "1", lang), cookies_header=lang_cookie)
+            self.respond_html(signup_page(params.get("message", [""])[0], params.get("error", ["0"])[0] == "1", lang, theme), cookies_header=lang_cookie)
             return
 
         if parsed.path == "/proto":
@@ -1344,12 +3328,12 @@ class KMFHandler(BaseHTTPRequestHandler):
             message = params.get("message", [""])[0]
             error = params.get("error", ["0"])[0] == "1"
             if user["role"] == "Student":
-                self.respond_html(student_dashboard(user, params, message, error, lang), cookies_header=lang_cookie)
+                self.respond_html(student_dashboard(user, params, message, error, lang, theme), cookies_header=lang_cookie)
                 return
-            self.respond_html(academic_dashboard(user, message, error, lang), cookies_header=lang_cookie)
+            self.respond_html(academic_dashboard(user, message, error, lang, theme), cookies_header=lang_cookie)
             return
 
-        self.respond_html(render_layout("Not Found", '<section class="hero"><h2>Page not found</h2></section>', None, lang), status=404, cookies_header=lang_cookie)
+        self.respond_html(render_layout("Not Found", '<section class="hero"><h2>Page not found</h2></section>', None, lang, theme), status=404, cookies_header=lang_cookie)
 
     def do_POST(self) -> None:
       ensure_database()
@@ -1359,6 +3343,7 @@ class KMFHandler(BaseHTTPRequestHandler):
       # preserve language selection across POST redirects
       params = parse_qs(parsed.query)
       lang = get_language(self, params) or DEFAULT_LANGUAGE
+      theme = get_theme(self, params)
       lang_cookie = None
       if params.get("lang", [""])[0].lower() in SUPPORTED_LANGUAGES:
         lang_cookie = build_language_cookie(lang)
@@ -1446,9 +3431,15 @@ class KMFHandler(BaseHTTPRequestHandler):
           self.redirect("/?message=Only+students+can+submit+requests&error=1", cookies_header=lang_cookie)
           return
 
+        requested_start = normalize_datetime_input(form.get("requested_start", ""))
+        requested_end = normalize_datetime_input(form.get("requested_end", ""))
+        room_id: int | None = None
         try:
+          room_id = int(form["room_id"])
           with get_connection() as conn:
-            conn.execute(
+            if find_conflicting_event_request(conn, room_id, requested_start, requested_end):
+              raise sqlite3.IntegrityError(EVENT_REQUEST_CONFLICT_MESSAGE)
+            cursor = conn.execute(
               """
               INSERT INTO Event_Requests (
                 requester_id, room_id, event_title, event_type,
@@ -1457,16 +3448,130 @@ class KMFHandler(BaseHTTPRequestHandler):
               """,
               (
                 user["user_id"],
-                int(form["room_id"]),
+                room_id,
                 form["event_title"],
                 form["event_type"],
-                form["requested_start"].replace("T", " ") + ":00",
-                form["requested_end"].replace("T", " ") + ":00",
+                requested_start,
+                requested_end,
                 form.get("request_note", "").strip() or None,
               ),
             )
+            conn.execute(
+              """
+              INSERT INTO Request_History (
+                request_id, actor_id, action, previous_status, new_status, action_note
+              ) VALUES (?, ?, 'Created', NULL, 'Pending', ?)
+              """,
+              (cursor.lastrowid, user["user_id"], form.get("request_note", "").strip() or None),
+            )
             conn.commit()
           self.redirect("/dashboard?message=Request+submitted+successfully", cookies_header=lang_cookie)
+        except (sqlite3.IntegrityError, sqlite3.OperationalError, KeyError, ValueError) as exc:
+          alternatives: list[sqlite3.Row] = []
+          if requested_start and requested_end and room_id is not None:
+            with get_connection() as conn:
+              alternatives = find_alternative_rooms(conn, requested_start, requested_end, room_id)
+          self.redirect(f"/dashboard?message={quote_plus(conflict_feedback(str(exc), alternatives, lang))}&error=1", cookies_header=lang_cookie)
+        return
+
+      if parsed.path == "/requests/update":
+        if user is None or user["role"] != "Student":
+          self.redirect("/?message=Only+students+can+submit+requests&error=1", cookies_header=lang_cookie)
+          return
+
+        requested_start = normalize_datetime_input(form.get("requested_start", ""))
+        requested_end = normalize_datetime_input(form.get("requested_end", ""))
+        room_id: int | None = None
+        request_id: int | None = None
+        try:
+          room_id = int(form["room_id"])
+          request_id = int(form["request_id"])
+          with get_connection() as conn:
+            current = conn.execute(
+              """
+              SELECT status
+              FROM Event_Requests
+              WHERE request_id = ? AND requester_id = ? AND status = 'Pending'
+              """,
+              (request_id, user["user_id"]),
+            ).fetchone()
+            if current is None:
+              self.redirect("/dashboard?message=Only+pending+requests+can+be+changed.&error=1", cookies_header=lang_cookie)
+              return
+            if find_conflicting_event_request(conn, room_id, requested_start, requested_end, request_id):
+              raise sqlite3.IntegrityError(EVENT_REQUEST_CONFLICT_MESSAGE)
+            conn.execute(
+              """
+              UPDATE Event_Requests
+              SET room_id = ?,
+                  event_title = ?,
+                  event_type = ?,
+                  requested_start = ?,
+                  requested_end = ?,
+                  request_note = ?
+              WHERE request_id = ? AND requester_id = ? AND status = 'Pending'
+              """,
+              (
+                room_id,
+                form["event_title"].strip(),
+                form["event_type"],
+                requested_start,
+                requested_end,
+                form.get("request_note", "").strip() or None,
+                request_id,
+                user["user_id"],
+              ),
+            )
+            conn.execute(
+              """
+              INSERT INTO Request_History (
+                request_id, actor_id, action, previous_status, new_status, action_note
+              ) VALUES (?, ?, 'Updated', 'Pending', 'Pending', ?)
+              """,
+              (request_id, user["user_id"], form.get("request_note", "").strip() or None),
+            )
+            conn.commit()
+          self.redirect("/dashboard?message=Request+updated+successfully", cookies_header=lang_cookie)
+        except (sqlite3.IntegrityError, sqlite3.OperationalError, KeyError, ValueError) as exc:
+          alternatives: list[sqlite3.Row] = []
+          if requested_start and requested_end and room_id is not None and request_id is not None:
+            with get_connection() as conn:
+              alternatives = find_alternative_rooms(conn, requested_start, requested_end, room_id, request_id)
+          self.redirect(f"/dashboard?message={quote_plus(conflict_feedback(str(exc), alternatives, lang))}&error=1", cookies_header=lang_cookie)
+        return
+
+      if parsed.path == "/requests/cancel":
+        if user is None or user["role"] != "Student":
+          self.redirect("/?message=Only+students+can+submit+requests&error=1", cookies_header=lang_cookie)
+          return
+
+        try:
+          request_id = int(form["request_id"])
+          with get_connection() as conn:
+            cursor = conn.execute(
+              """
+              UPDATE Event_Requests
+              SET status = 'Cancelled',
+                  decision_at = CURRENT_TIMESTAMP,
+                  rejection_reason = NULL,
+                  decision_note = ?
+              WHERE request_id = ? AND requester_id = ? AND status = 'Pending'
+              """,
+              (t("request_cancelled_success", lang), request_id, user["user_id"]),
+            )
+            if cursor.rowcount == 0:
+              self.redirect("/dashboard?message=Only+pending+requests+can+be+changed.&error=1", cookies_header=lang_cookie)
+              return
+            conn.execute(
+              """
+              INSERT INTO Request_History (
+                request_id, actor_id, action, previous_status, new_status, action_note
+              ) VALUES (?, ?, 'Cancelled', 'Pending', 'Cancelled', ?)
+              """,
+              (request_id, user["user_id"], t("request_cancelled_success", lang)),
+            )
+            conn.commit()
+          self.redirect("/dashboard?message=Request+cancelled+successfully", cookies_header=lang_cookie)
         except (sqlite3.IntegrityError, sqlite3.OperationalError, KeyError, ValueError) as exc:
           self.redirect(f"/dashboard?message={quote_plus(str(exc))}&error=1", cookies_header=lang_cookie)
         return
@@ -1480,40 +3585,79 @@ class KMFHandler(BaseHTTPRequestHandler):
         if decision not in {"Approved", "Rejected"}:
           self.redirect("/dashboard?message=Unsupported+decision&error=1", cookies_header=lang_cookie)
           return
+        decision_note = form.get("decision_note", "").strip()
+        if decision == "Rejected" and not decision_note:
+          self.redirect("/dashboard?message=Rejection+reason+is+required.&error=1", cookies_header=lang_cookie)
+          return
 
         try:
+          request_id = int(form["request_id"])
           with get_connection() as conn:
+            target_request = conn.execute(
+              """
+              SELECT request_id, room_id, requested_start, requested_end
+              FROM Event_Requests
+              WHERE request_id = ? AND status = 'Pending'
+              """,
+              (request_id,),
+            ).fetchone()
+            if target_request is None:
+              self.redirect("/dashboard?message=Only+pending+requests+can+be+changed.&error=1", cookies_header=lang_cookie)
+              return
             if decision == "Approved":
-              conn.execute(
+              cursor = conn.execute(
                 """
                 UPDATE Event_Requests
                 SET status = 'Approved',
                   approved_by = ?,
                   decision_at = CURRENT_TIMESTAMP,
-                  rejection_reason = NULL
+                  rejection_reason = NULL,
+                  decision_note = ?
                 WHERE request_id = ? AND status = 'Pending'
                 """,
-                (user["user_id"], int(form["request_id"])),
+                (user["user_id"], decision_note or None, request_id),
               )
             else:
-              conn.execute(
+              cursor = conn.execute(
                 """
                 UPDATE Event_Requests
                 SET status = 'Rejected',
                   approved_by = ?,
                   decision_at = CURRENT_TIMESTAMP,
-                  rejection_reason = 'Rejected from academic dashboard'
+                  rejection_reason = ?,
+                  decision_note = ?
                 WHERE request_id = ? AND status = 'Pending'
                 """,
-                (user["user_id"], int(form["request_id"])),
+                (user["user_id"], decision_note, decision_note, request_id),
               )
+            if cursor.rowcount == 0:
+              self.redirect("/dashboard?message=Only+pending+requests+can+be+changed.&error=1", cookies_header=lang_cookie)
+              return
+            conn.execute(
+              """
+              INSERT INTO Request_History (
+                request_id, actor_id, action, previous_status, new_status, action_note
+              ) VALUES (?, ?, ?, 'Pending', ?, ?)
+              """,
+              (request_id, user["user_id"], decision, decision, decision_note or None),
+            )
             conn.commit()
           self.redirect(f"/dashboard?message=Request+{decision.lower()}+successfully", cookies_header=lang_cookie)
         except (sqlite3.IntegrityError, sqlite3.OperationalError, KeyError, ValueError) as exc:
-          self.redirect(f"/dashboard?message={quote_plus(str(exc))}&error=1", cookies_header=lang_cookie)
+          alternatives: list[sqlite3.Row] = []
+          if "target_request" in locals() and target_request is not None:
+            with get_connection() as conn:
+              alternatives = find_alternative_rooms(
+                conn,
+                target_request["requested_start"],
+                target_request["requested_end"],
+                target_request["room_id"],
+                target_request["request_id"],
+              )
+          self.redirect(f"/dashboard?message={quote_plus(conflict_feedback(str(exc), alternatives, lang))}&error=1", cookies_header=lang_cookie)
         return
 
-      self.respond_html(render_layout("Not Found", '<section class="hero"><h2>Page not found</h2></section>'), status=404, cookies_header=lang_cookie)
+      self.respond_html(render_layout("Not Found", '<section class="hero"><h2>Page not found</h2></section>', None, lang, theme), status=404, cookies_header=lang_cookie)
 
     def respond_html(self, body: str, status: int = 200, cookies_header: cookies.SimpleCookie | None = None) -> None:
         payload = body.encode("utf-8")

@@ -14,6 +14,7 @@ DROP TRIGGER IF EXISTS trg_event_request_conflict_guard_insert;
 DROP TRIGGER IF EXISTS trg_event_request_conflict_guard_update;
 
 DROP TABLE IF EXISTS Usage_Logs;
+DROP TABLE IF EXISTS Request_History;
 DROP TABLE IF EXISTS Event_Requests;
 DROP TABLE IF EXISTS Academic_Schedules;
 DROP TABLE IF EXISTS Classrooms;
@@ -45,7 +46,7 @@ CREATE TABLE Users (
 CREATE TABLE Classrooms (
     room_id INTEGER PRIMARY KEY,
     room_code TEXT NOT NULL UNIQUE,
-    block TEXT NOT NULL CHECK (block IN ('A', 'B', 'C', 'D')),
+    block TEXT NOT NULL CHECK (block IN ('KMB', 'KME', 'KMF SNL')),
     floor INTEGER NOT NULL CHECK (floor BETWEEN 0 AND 10),
     capacity INTEGER NOT NULL CHECK (capacity BETWEEN 5 AND 500),
     specs TEXT NOT NULL,
@@ -93,10 +94,11 @@ CREATE TABLE Event_Requests (
     event_type TEXT NOT NULL CHECK (event_type IN ('Workshop', 'Club', 'Makeup', 'Exam', 'Seminar')),
     requested_start TEXT NOT NULL,
     requested_end TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'Pending' CHECK (status IN ('Pending', 'Approved', 'Rejected')),
+    status TEXT NOT NULL DEFAULT 'Pending' CHECK (status IN ('Pending', 'Approved', 'Rejected', 'Cancelled')),
     approved_by INTEGER,
     decision_at TEXT,
     rejection_reason TEXT,
+    decision_note TEXT,
     request_note TEXT,
     FOREIGN KEY (requester_id) REFERENCES Users(user_id)
         ON UPDATE CASCADE
@@ -113,8 +115,26 @@ CREATE TABLE Event_Requests (
     CHECK (
         (status = 'Pending' AND approved_by IS NULL AND decision_at IS NULL)
         OR (status = 'Approved' AND approved_by IS NOT NULL AND decision_at IS NOT NULL)
-        OR (status = 'Rejected' AND decision_at IS NOT NULL)
+        OR (status = 'Rejected' AND approved_by IS NOT NULL AND decision_at IS NOT NULL)
+        OR (status = 'Cancelled' AND approved_by IS NULL AND decision_at IS NOT NULL)
     )
+);
+
+CREATE TABLE Request_History (
+    history_id INTEGER PRIMARY KEY,
+    request_id INTEGER NOT NULL,
+    actor_id INTEGER NOT NULL,
+    action TEXT NOT NULL CHECK (action IN ('Created', 'Updated', 'Cancelled', 'Approved', 'Rejected')),
+    previous_status TEXT CHECK (previous_status IS NULL OR previous_status IN ('Pending', 'Approved', 'Rejected', 'Cancelled')),
+    new_status TEXT NOT NULL CHECK (new_status IN ('Pending', 'Approved', 'Rejected', 'Cancelled')),
+    action_note TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (request_id) REFERENCES Event_Requests(request_id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+    FOREIGN KEY (actor_id) REFERENCES Users(user_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT
 );
 
 CREATE TABLE Usage_Logs (
@@ -193,16 +213,54 @@ BEGIN
                 SELECT 1
                 FROM Academic_Schedules s
                 WHERE s.room_id = NEW.room_id
-                  AND s.weekday = NEW.weekday
-                  AND datetime(NEW.start_at) < datetime(s.end_at)
-                  AND datetime(NEW.end_at) > datetime(s.start_at)
+                  AND (
+                    (
+                      date(NEW.start_at) = date(s.start_at)
+                      AND datetime(NEW.start_at) < datetime(s.end_at)
+                      AND datetime(NEW.end_at) > datetime(s.start_at)
+                    )
+                    OR (
+                      s.weekday = NEW.weekday
+                      AND time(NEW.start_at) < time(s.end_at)
+                      AND time(NEW.end_at) > time(s.start_at)
+                      AND (
+                        NEW.recurrence_pattern = 'Weekly'
+                        OR s.recurrence_pattern = 'Weekly'
+                        OR (
+                          NEW.recurrence_pattern = 'Biweekly'
+                          AND s.recurrence_pattern = 'Biweekly'
+                          AND ABS(CAST(julianday(date(NEW.start_at)) - julianday(date(s.start_at)) AS INTEGER)) % 14 = 0
+                        )
+                        OR (
+                          NEW.recurrence_pattern = 'Once'
+                          AND s.recurrence_pattern = 'Biweekly'
+                          AND date(NEW.start_at) >= date(s.start_at)
+                          AND ABS(CAST(julianday(date(NEW.start_at)) - julianday(date(s.start_at)) AS INTEGER)) % 14 = 0
+                        )
+                        OR (
+                          NEW.recurrence_pattern = 'Biweekly'
+                          AND s.recurrence_pattern = 'Once'
+                          AND date(s.start_at) >= date(NEW.start_at)
+                          AND ABS(CAST(julianday(date(s.start_at)) - julianday(date(NEW.start_at)) AS INTEGER)) % 14 = 0
+                        )
+                      )
+                      AND (
+                        NEW.recurrence_pattern <> 'Once'
+                        OR date(NEW.start_at) >= date(s.start_at)
+                      )
+                      AND (
+                        s.recurrence_pattern <> 'Once'
+                        OR date(s.start_at) >= date(NEW.start_at)
+                      )
+                    )
+                  )
             )
-            THEN RAISE(ABORT, 'Schedule conflict detected for the selected classroom.')
+            THEN RAISE(ABORT, 'Recurring schedule conflict detected for the selected classroom.')
         END;
 END;
 
 CREATE TRIGGER trg_schedule_conflict_guard_update
-BEFORE UPDATE OF room_id, weekday, start_at, end_at ON Academic_Schedules
+BEFORE UPDATE OF room_id, weekday, start_at, end_at, recurrence_pattern ON Academic_Schedules
 FOR EACH ROW
 BEGIN
     SELECT
@@ -211,12 +269,50 @@ BEGIN
                 SELECT 1
                 FROM Academic_Schedules s
                 WHERE s.room_id = NEW.room_id
-                  AND s.weekday = NEW.weekday
                   AND s.schedule_id <> NEW.schedule_id
-                  AND datetime(NEW.start_at) < datetime(s.end_at)
-                  AND datetime(NEW.end_at) > datetime(s.start_at)
+                  AND (
+                    (
+                      date(NEW.start_at) = date(s.start_at)
+                      AND datetime(NEW.start_at) < datetime(s.end_at)
+                      AND datetime(NEW.end_at) > datetime(s.start_at)
+                    )
+                    OR (
+                      s.weekday = NEW.weekday
+                      AND time(NEW.start_at) < time(s.end_at)
+                      AND time(NEW.end_at) > time(s.start_at)
+                      AND (
+                        NEW.recurrence_pattern = 'Weekly'
+                        OR s.recurrence_pattern = 'Weekly'
+                        OR (
+                          NEW.recurrence_pattern = 'Biweekly'
+                          AND s.recurrence_pattern = 'Biweekly'
+                          AND ABS(CAST(julianday(date(NEW.start_at)) - julianday(date(s.start_at)) AS INTEGER)) % 14 = 0
+                        )
+                        OR (
+                          NEW.recurrence_pattern = 'Once'
+                          AND s.recurrence_pattern = 'Biweekly'
+                          AND date(NEW.start_at) >= date(s.start_at)
+                          AND ABS(CAST(julianday(date(NEW.start_at)) - julianday(date(s.start_at)) AS INTEGER)) % 14 = 0
+                        )
+                        OR (
+                          NEW.recurrence_pattern = 'Biweekly'
+                          AND s.recurrence_pattern = 'Once'
+                          AND date(s.start_at) >= date(NEW.start_at)
+                          AND ABS(CAST(julianday(date(s.start_at)) - julianday(date(NEW.start_at)) AS INTEGER)) % 14 = 0
+                        )
+                      )
+                      AND (
+                        NEW.recurrence_pattern <> 'Once'
+                        OR date(NEW.start_at) >= date(s.start_at)
+                      )
+                      AND (
+                        s.recurrence_pattern <> 'Once'
+                        OR date(s.start_at) >= date(NEW.start_at)
+                      )
+                    )
+                  )
             )
-            THEN RAISE(ABORT, 'Schedule conflict detected for the selected classroom.')
+            THEN RAISE(ABORT, 'Recurring schedule conflict detected for the selected classroom.')
         END;
 END;
 
@@ -231,10 +327,31 @@ BEGIN
                     SELECT 1
                     FROM Academic_Schedules s
                     WHERE s.room_id = NEW.room_id
-                      AND datetime(NEW.requested_start) < datetime(s.end_at)
-                      AND datetime(NEW.requested_end) > datetime(s.start_at)
+                      AND (
+                        (
+                          date(NEW.requested_start) = date(s.start_at)
+                          AND datetime(NEW.requested_start) < datetime(s.end_at)
+                          AND datetime(NEW.requested_end) > datetime(s.start_at)
+                        )
+                        OR (
+                          s.recurrence_pattern IN ('Weekly', 'Biweekly')
+                          AND (
+                            CASE strftime('%w', NEW.requested_start)
+                              WHEN '0' THEN 7
+                              ELSE CAST(strftime('%w', NEW.requested_start) AS INTEGER)
+                            END
+                          ) = s.weekday
+                          AND date(NEW.requested_start) >= date(s.start_at)
+                          AND time(NEW.requested_start) < time(s.end_at)
+                          AND time(NEW.requested_end) > time(s.start_at)
+                          AND (
+                            s.recurrence_pattern = 'Weekly'
+                            OR ABS(CAST(julianday(date(NEW.requested_start)) - julianday(date(s.start_at)) AS INTEGER)) % 14 = 0
+                          )
+                        )
+                      )
                  )
-            THEN RAISE(ABORT, 'Event request conflicts with an academic schedule.')
+            THEN RAISE(ABORT, 'Event request conflicts with a recurring academic schedule.')
         END;
 
     SELECT
@@ -263,10 +380,31 @@ BEGIN
                     SELECT 1
                     FROM Academic_Schedules s
                     WHERE s.room_id = NEW.room_id
-                      AND datetime(NEW.requested_start) < datetime(s.end_at)
-                      AND datetime(NEW.requested_end) > datetime(s.start_at)
+                      AND (
+                        (
+                          date(NEW.requested_start) = date(s.start_at)
+                          AND datetime(NEW.requested_start) < datetime(s.end_at)
+                          AND datetime(NEW.requested_end) > datetime(s.start_at)
+                        )
+                        OR (
+                          s.recurrence_pattern IN ('Weekly', 'Biweekly')
+                          AND (
+                            CASE strftime('%w', NEW.requested_start)
+                              WHEN '0' THEN 7
+                              ELSE CAST(strftime('%w', NEW.requested_start) AS INTEGER)
+                            END
+                          ) = s.weekday
+                          AND date(NEW.requested_start) >= date(s.start_at)
+                          AND time(NEW.requested_start) < time(s.end_at)
+                          AND time(NEW.requested_end) > time(s.start_at)
+                          AND (
+                            s.recurrence_pattern = 'Weekly'
+                            OR ABS(CAST(julianday(date(NEW.requested_start)) - julianday(date(s.start_at)) AS INTEGER)) % 14 = 0
+                          )
+                        )
+                      )
                  )
-            THEN RAISE(ABORT, 'Event request conflicts with an academic schedule.')
+            THEN RAISE(ABORT, 'Event request conflicts with a recurring academic schedule.')
         END;
 
     SELECT
@@ -296,6 +434,9 @@ CREATE INDEX idx_schedules_room_time
 
 CREATE INDEX idx_event_requests_room_time
     ON Event_Requests (room_id, requested_start, requested_end);
+
+CREATE INDEX idx_request_history_request_created
+    ON Request_History (request_id, created_at DESC);
 
 CREATE VIEW v_student_live_status AS
 SELECT
@@ -364,56 +505,96 @@ INSERT INTO Departments (department_id, department_name, department_code) VALUES
     (5, 'Bioengineering', 'BIOE');
 
 INSERT INTO Users (user_id, department_id, name, email, password_hash, role) VALUES
-    (1, 1, 'Ayse Demir', 'ayse.demir@ytu.edu.tr', 'ef61a579c907bbed674c0dbcbcf7f7af8f851538eef7b8e58c5bee0b8', 'Academic'),
-    (2, 2, 'Mehmet Kaya', 'mehmet.kaya@ytu.edu.tr', 'ef61a579c907bbed674c0dbcbcf7f7af8f851538eef7b8e58c5bee0b8', 'Academic'),
-    (3, 3, 'Selin Arslan', 'selin.arslan@ytu.edu.tr', 'ef61a579c907bbed674c0dbcbcf7f7af8f851538eef7b8e58c5bee0b8', 'Academic'),
-    (4, 4, 'Can Yilmaz', 'can.yilmaz@std.yildiz.edu.tr', 'ef61a579c907bbed674c0dbcbcf7f7af8f851538eef7b8e58c5bee0b8', 'Student'),
-    (5, 5, 'Zeynep Acar', 'zeynep.acar@std.yildiz.edu.tr', 'ef61a579c907bbed674c0dbcbcf7f7af8f851538eef7b8e58c5bee0b8', 'Student'),
-    (6, 1, 'Berk Gunes', 'berk.gunes@std.yildiz.edu.tr', 'ef61a579c907bbed674c0dbcbcf7f7af8f851538eef7b8e58c5bee0b8', 'Student'),
-    (7, 2, 'Elif Kurt', 'elif.kurt@ytu.edu.tr', 'ef61a579c907bbed674c0dbcbcf7f7af8f851538eef7b8e58c5bee0b8', 'Academic'),
-    (8, 3, 'Mert Sahin', 'mert.sahin@std.yildiz.edu.tr', 'ef61a579c907bbed674c0dbcbcf7f7af8f851538eef7b8e58c5bee0b8', 'Student'),
-    (9, 4, 'Deniz Ozturk', 'deniz.ozturk@std.yildiz.edu.tr', 'ef61a579c907bbed674c0dbcbcf7f7af8f851538eef7b8e58c5bee0b8', 'Student'),
-    (10, 5, 'Seda Inan', 'seda.inan@ytu.edu.tr', 'ef61a579c907bbed674c0dbcbcf7f7af8f851538eef7b8e58c5bee0b8', 'Academic');
+    (1, 1, 'Ayse Demir', 'ayse.demir@ytu.edu.tr', '588c55f3ce2b8569b153c5abbf13f9f74308b88a20017cc699b835cc93195d16', 'Academic'),
+    (2, 2, 'Mehmet Kaya', 'mehmet.kaya@ytu.edu.tr', '588c55f3ce2b8569b153c5abbf13f9f74308b88a20017cc699b835cc93195d16', 'Academic'),
+    (3, 3, 'Selin Arslan', 'selin.arslan@ytu.edu.tr', '588c55f3ce2b8569b153c5abbf13f9f74308b88a20017cc699b835cc93195d16', 'Academic'),
+    (4, 4, 'Can Yilmaz', 'can.yilmaz@std.yildiz.edu.tr', '588c55f3ce2b8569b153c5abbf13f9f74308b88a20017cc699b835cc93195d16', 'Student'),
+    (5, 5, 'Zeynep Acar', 'zeynep.acar@std.yildiz.edu.tr', '588c55f3ce2b8569b153c5abbf13f9f74308b88a20017cc699b835cc93195d16', 'Student'),
+    (6, 1, 'Berk Gunes', 'berk.gunes@std.yildiz.edu.tr', '588c55f3ce2b8569b153c5abbf13f9f74308b88a20017cc699b835cc93195d16', 'Student'),
+    (7, 2, 'Elif Kurt', 'elif.kurt@ytu.edu.tr', '588c55f3ce2b8569b153c5abbf13f9f74308b88a20017cc699b835cc93195d16', 'Academic'),
+    (8, 3, 'Mert Sahin', 'mert.sahin@std.yildiz.edu.tr', '588c55f3ce2b8569b153c5abbf13f9f74308b88a20017cc699b835cc93195d16', 'Student'),
+    (9, 4, 'Deniz Ozturk', 'deniz.ozturk@std.yildiz.edu.tr', '588c55f3ce2b8569b153c5abbf13f9f74308b88a20017cc699b835cc93195d16', 'Student'),
+    (10, 5, 'Seda Inan', 'seda.inan@ytu.edu.tr', '588c55f3ce2b8569b153c5abbf13f9f74308b88a20017cc699b835cc93195d16', 'Academic');
 
 INSERT INTO Classrooms (room_id, room_code, block, floor, capacity, specs) VALUES
-    (101, 'A-101', 'A', 1, 40, '{"projector":true,"power_outlets":24,"smart_board":true,"air_conditioning":true}'),
-    (102, 'A-102', 'A', 1, 30, '{"projector":true,"power_outlets":16,"smart_board":false,"air_conditioning":true}'),
-    (201, 'B-201', 'B', 2, 60, '{"projector":true,"power_outlets":40,"smart_board":true,"air_conditioning":true}'),
-    (202, 'B-202', 'B', 2, 45, '{"projector":false,"power_outlets":18,"smart_board":true,"air_conditioning":true}'),
-    (301, 'C-301', 'C', 3, 80, '{"projector":true,"power_outlets":52,"smart_board":true,"air_conditioning":true}'),
-    (302, 'D-010', 'D', 0, 25, '{"projector":false,"power_outlets":12,"smart_board":false,"air_conditioning":false}');
+    (202, 'KMB-202', 'KMB', 2, 40, '{"projector":true,"power_outlets":24,"smart_board":true,"air_conditioning":true}'),
+    (203, 'KMB-203', 'KMB', 2, 40, '{"projector":true,"power_outlets":24,"smart_board":true,"air_conditioning":true}'),
+    (210, 'KMB-210', 'KMB', 2, 60, '{"projector":true,"power_outlets":40,"smart_board":true,"air_conditioning":true}'),
+    (211, 'KMB-211', 'KMB', 2, 45, '{"projector":false,"power_outlets":18,"smart_board":true,"air_conditioning":true}'),
+    (212, 'KMB-212', 'KMB', 2, 45, '{"projector":true,"power_outlets":24,"smart_board":true,"air_conditioning":true}'),
+    (213, 'KMB-213', 'KMB', 2, 45, '{"projector":true,"power_outlets":24,"smart_board":false,"air_conditioning":true}'),
+    (2131, 'KMB-213-A', 'KMB', 2, 25, '{"projector":true,"power_outlets":16,"smart_board":false,"air_conditioning":true}'),
+    (214, 'KMB-214', 'KMB', 2, 45, '{"projector":true,"power_outlets":24,"smart_board":true,"air_conditioning":true}'),
+    (215, 'KMB-215', 'KMB', 2, 45, '{"projector":true,"power_outlets":24,"smart_board":true,"air_conditioning":true}'),
+    (216, 'KMB-216', 'KMB', 2, 45, '{"projector":true,"power_outlets":24,"smart_board":true,"air_conditioning":true}'),
+    (217, 'KMB-217', 'KMB', 2, 45, '{"projector":true,"power_outlets":24,"smart_board":false,"air_conditioning":true}'),
+    (224, 'KMB-224', 'KMB', 2, 50, '{"projector":true,"power_outlets":30,"smart_board":true,"air_conditioning":true}'),
+    (227, 'KMB-227', 'KMB', 2, 50, '{"projector":true,"power_outlets":30,"smart_board":true,"air_conditioning":true}'),
+    (228, 'KMB-228', 'KMB', 2, 50, '{"projector":true,"power_outlets":30,"smart_board":true,"air_conditioning":true}'),
+    (305, 'KMB-305', 'KMB', 3, 60, '{"projector":true,"power_outlets":40,"smart_board":true,"air_conditioning":true}'),
+    (312, 'KMB-312', 'KMB', 3, 45, '{"projector":true,"power_outlets":24,"smart_board":true,"air_conditioning":true}'),
+    (314, 'KMB-314', 'KMB', 3, 45, '{"projector":true,"power_outlets":24,"smart_board":true,"air_conditioning":true}'),
+    (315, 'KMB-315', 'KMB', 3, 45, '{"projector":true,"power_outlets":24,"smart_board":true,"air_conditioning":true}'),
+    (316, 'KMB-316', 'KMB', 3, 45, '{"projector":true,"power_outlets":24,"smart_board":true,"air_conditioning":true}'),
+    (317, 'KMB-317', 'KMB', 3, 45, '{"projector":true,"power_outlets":24,"smart_board":false,"air_conditioning":true}'),
+    (318, 'KMB-318', 'KMB', 3, 45, '{"projector":true,"power_outlets":24,"smart_board":true,"air_conditioning":true}'),
+    (320, 'KMB-320', 'KMB', 3, 50, '{"projector":true,"power_outlets":30,"smart_board":true,"air_conditioning":true}'),
+    (321, 'KMB-321', 'KMB', 3, 50, '{"projector":true,"power_outlets":30,"smart_board":true,"air_conditioning":true}'),
+    (322, 'KMB-322', 'KMB', 3, 50, '{"projector":true,"power_outlets":30,"smart_board":true,"air_conditioning":true}'),
+    (327, 'KMB-327', 'KMB', 3, 50, '{"projector":true,"power_outlets":30,"smart_board":true,"air_conditioning":true}'),
+    (328, 'KMB-328', 'KMB', 3, 50, '{"projector":true,"power_outlets":30,"smart_board":true,"air_conditioning":true}'),
+    (329, 'KMB-329', 'KMB', 3, 50, '{"projector":true,"power_outlets":30,"smart_board":true,"air_conditioning":true}'),
+    (3291, 'KMB-329-A', 'KMB', 3, 25, '{"projector":true,"power_outlets":16,"smart_board":false,"air_conditioning":true}'),
+    (1208, 'KME-208', 'KME', 2, 45, '{"projector":true,"power_outlets":24,"smart_board":true,"air_conditioning":true}'),
+    (1304, 'KME-304', 'KME', 3, 45, '{"projector":true,"power_outlets":24,"smart_board":true,"air_conditioning":true}'),
+    (1305, 'KME-305', 'KME', 3, 45, '{"projector":true,"power_outlets":24,"smart_board":true,"air_conditioning":true}'),
+    (1306, 'KME-306', 'KME', 3, 45, '{"projector":true,"power_outlets":24,"smart_board":true,"air_conditioning":true}'),
+    (2002, 'KMF SNL-002', 'KMF SNL', 0, 80, '{"projector":true,"power_outlets":52,"smart_board":true,"air_conditioning":true}'),
+    (2021, 'KMF SNL-021', 'KMF SNL', 0, 80, '{"projector":true,"power_outlets":52,"smart_board":true,"air_conditioning":true}');
 
 INSERT INTO Academic_Schedules (
     schedule_id, academic_id, department_id, room_id, schedule_type, title,
     start_at, end_at, weekday, recurrence_pattern, term_label, notes
 ) VALUES
-    (1, 1, 1, 101, 'Lecture', 'Linear Algebra II', '2026-04-20 09:00:00', '2026-04-20 10:50:00', 1, 'Weekly', 'Spring 2025-2026', 'Core undergraduate course'),
-    (2, 2, 2, 201, 'Lecture', 'Reaction Engineering', '2026-04-21 10:00:00', '2026-04-21 11:50:00', 2, 'Weekly', 'Spring 2025-2026', 'Lab-supported lecture'),
-    (3, 3, 3, 301, 'Exam', 'Materials Science Midterm', '2026-04-22 13:00:00', '2026-04-22 15:00:00', 3, 'Once', 'Spring 2025-2026', 'Midterm session'),
-    (4, 7, 4, 202, 'Lecture', 'Food Microbiology', '2026-04-23 14:00:00', '2026-04-23 15:50:00', 4, 'Weekly', 'Spring 2025-2026', 'Shared elective'),
-    (5, 10, 5, 102, 'Exam', 'BioProcess Systems Quiz', '2026-04-24 09:30:00', '2026-04-24 10:30:00', 5, 'Once', 'Spring 2025-2026', 'Short quiz');
+    (1, 1, 1, 202, 'Lecture', 'Linear Algebra II', '2026-04-20 09:00:00', '2026-04-20 10:50:00', 1, 'Weekly', 'Spring 2025-2026', 'Core undergraduate course'),
+    (2, 2, 2, 210, 'Lecture', 'Reaction Engineering', '2026-04-21 10:00:00', '2026-04-21 11:50:00', 2, 'Weekly', 'Spring 2025-2026', 'Lab-supported lecture'),
+    (3, 3, 3, 212, 'Exam', 'Materials Science Midterm', '2026-04-22 13:00:00', '2026-04-22 15:00:00', 3, 'Once', 'Spring 2025-2026', 'Midterm session'),
+    (4, 7, 4, 211, 'Lecture', 'Food Microbiology', '2026-04-23 14:00:00', '2026-04-23 15:50:00', 4, 'Weekly', 'Spring 2025-2026', 'Shared elective'),
+    (5, 10, 5, 203, 'Exam', 'BioProcess Systems Quiz', '2026-04-24 09:30:00', '2026-04-24 10:30:00', 5, 'Once', 'Spring 2025-2026', 'Short quiz');
 
 INSERT INTO Event_Requests (
     request_id, requester_id, room_id, event_title, event_type, requested_start, requested_end,
-    status, approved_by, decision_at, rejection_reason, request_note
+    status, approved_by, decision_at, rejection_reason, decision_note, request_note
 ) VALUES
-    (1, 4, 101, 'Math Club Problem Solving Session', 'Workshop', '2026-04-20 12:00:00', '2026-04-20 13:30:00', 'Approved', 1, '2026-04-18 10:00:00', NULL, 'Need board access'),
-    (2, 5, 202, 'Food Innovation Society Meetup', 'Seminar', '2026-04-23 16:15:00', '2026-04-23 17:30:00', 'Pending', NULL, NULL, NULL, 'Expected 20 attendees'),
-    (3, 6, 302, 'Bioinformatics Peer Study', 'Workshop', '2026-04-24 11:00:00', '2026-04-24 12:30:00', 'Approved', 10, '2026-04-18 10:15:00', NULL, 'Need power outlets'),
-    (4, 8, 201, 'Chemical Engineering Makeup Session', 'Makeup', '2026-04-21 13:00:00', '2026-04-21 14:30:00', 'Rejected', 2, '2026-04-18 10:20:00', 'Room reserved for maintenance preparation', 'Alternative date requested'),
-    (5, 9, 102, 'Career Talk with Alumni', 'Seminar', '2026-04-24 11:00:00', '2026-04-24 12:00:00', 'Pending', NULL, NULL, NULL, 'Public event announcement pending');
+    (1, 4, 202, 'Math Club Problem Solving Session', 'Workshop', '2026-04-20 12:00:00', '2026-04-20 13:30:00', 'Approved', 1, '2026-04-18 10:00:00', NULL, 'Approved for math club practice.', 'Need board access'),
+    (2, 5, 211, 'Food Innovation Society Meetup', 'Seminar', '2026-04-23 16:15:00', '2026-04-23 17:30:00', 'Pending', NULL, NULL, NULL, NULL, 'Expected 20 attendees'),
+    (3, 6, 213, 'Bioinformatics Peer Study', 'Workshop', '2026-04-24 11:00:00', '2026-04-24 12:30:00', 'Approved', 10, '2026-04-18 10:15:00', NULL, 'Small room is acceptable for peer study.', 'Need power outlets'),
+    (4, 8, 210, 'Chemical Engineering Makeup Session', 'Makeup', '2026-04-21 13:00:00', '2026-04-21 14:30:00', 'Rejected', 2, '2026-04-18 10:20:00', 'Room reserved for maintenance preparation', 'Room reserved for maintenance preparation', 'Alternative date requested'),
+    (5, 9, 203, 'Career Talk with Alumni', 'Seminar', '2026-04-24 11:00:00', '2026-04-24 12:00:00', 'Pending', NULL, NULL, NULL, NULL, 'Public event announcement pending');
+
+INSERT INTO Request_History (
+    history_id, request_id, actor_id, action, previous_status, new_status, action_note, created_at
+) VALUES
+    (1, 1, 4, 'Created', NULL, 'Pending', 'Need board access', '2026-04-17 09:00:00'),
+    (2, 1, 1, 'Approved', 'Pending', 'Approved', 'Approved for math club practice.', '2026-04-18 10:00:00'),
+    (3, 2, 5, 'Created', NULL, 'Pending', 'Expected 20 attendees', '2026-04-18 09:15:00'),
+    (4, 3, 6, 'Created', NULL, 'Pending', 'Need power outlets', '2026-04-17 14:30:00'),
+    (5, 3, 10, 'Approved', 'Pending', 'Approved', 'Small room is acceptable for peer study.', '2026-04-18 10:15:00'),
+    (6, 4, 8, 'Created', NULL, 'Pending', 'Alternative date requested', '2026-04-17 16:40:00'),
+    (7, 4, 2, 'Rejected', 'Pending', 'Rejected', 'Room reserved for maintenance preparation', '2026-04-18 10:20:00'),
+    (8, 5, 9, 'Created', NULL, 'Pending', 'Public event announcement pending', '2026-04-18 11:30:00');
 
 INSERT INTO Usage_Logs (log_id, room_id, observed_at, occupancy_count, status, source) VALUES
-    (1, 101, '2026-04-18 08:00:00', 12, 'Occupied', 'Sensor'),
-    (2, 101, '2026-04-18 09:00:00', 28, 'Occupied', 'Sensor'),
-    (3, 102, '2026-04-18 09:10:00', 10, 'Available', 'Sensor'),
-    (4, 201, '2026-04-18 10:00:00', 35, 'Occupied', 'Sensor'),
-    (5, 201, '2026-04-18 11:00:00', 0, 'Reserved', 'System'),
-    (6, 202, '2026-04-18 11:15:00', 18, 'Occupied', 'Sensor'),
-    (7, 301, '2026-04-18 12:00:00', 52, 'Occupied', 'Sensor'),
-    (8, 301, '2026-04-18 14:30:00', 0, 'Reserved', 'System'),
-    (9, 302, '2026-04-18 15:00:00', 8, 'Available', 'Manual'),
-    (10, 302, '2026-04-18 16:00:00', 0, 'Maintenance', 'System');
+    (1, 202, '2026-04-18 08:00:00', 12, 'Occupied', 'Sensor'),
+    (2, 202, '2026-04-18 09:00:00', 28, 'Occupied', 'Sensor'),
+    (3, 203, '2026-04-18 09:10:00', 10, 'Available', 'Sensor'),
+    (4, 210, '2026-04-18 10:00:00', 35, 'Occupied', 'Sensor'),
+    (5, 210, '2026-04-18 11:00:00', 0, 'Reserved', 'System'),
+    (6, 211, '2026-04-18 11:15:00', 18, 'Occupied', 'Sensor'),
+    (7, 212, '2026-04-18 12:00:00', 32, 'Occupied', 'Sensor'),
+    (8, 212, '2026-04-18 14:30:00', 0, 'Reserved', 'System'),
+    (9, 213, '2026-04-18 15:00:00', 8, 'Available', 'Manual'),
+    (10, 213, '2026-04-18 16:00:00', 0, 'Maintenance', 'System');
 
 COMMIT;
 
