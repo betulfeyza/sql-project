@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import html
 import hashlib
+import hmac
+import re
 import secrets
 import string
 import sqlite3
+import time
+from datetime import datetime
 from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -17,18 +21,45 @@ SETUP_PATH = BASE_DIR / "setup.sql"
 HOST = "127.0.0.1"
 PORT = 8000
 SESSION_COOKIE = "kmf_session"
-SESSIONS: dict[str, int] = {}
+SESSION_TTL_SECONDS = 8 * 60 * 60
+PASSWORD_ALGORITHM = "pbkdf2_sha256"
+PBKDF2_ITERATIONS = 180_000
+DEMO_PASSWORD = "Demo123!"
+ALLOWED_EVENT_TYPES = {"Workshop", "Club", "Makeup", "Exam", "Seminar"}
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+SESSIONS: dict[str, dict[str, object]] = {}
 
 
 def ensure_database() -> None:
+    required_objects = {
+        ("table", "Users"),
+        ("table", "Request_Audit_Log"),
+        ("view", "v_student_live_status"),
+        ("view", "v_exam_coordination"),
+        ("view", "v_room_utilization_summary"),
+    }
     initialize = not DB_PATH.exists()
 
     if not initialize:
         with sqlite3.connect(DB_PATH) as conn:
-            existing = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='Users'"
-            ).fetchone()
-            initialize = existing is None
+            existing_objects = {
+                tuple(row)
+                for row in conn.execute(
+                    """
+                    SELECT type, name
+                    FROM sqlite_master
+                    WHERE (type = 'table' OR type = 'view')
+                      AND name IN (
+                        'Users',
+                        'Request_Audit_Log',
+                        'v_student_live_status',
+                        'v_exam_coordination',
+                        'v_room_utilization_summary'
+                      )
+                    """
+                ).fetchall()
+            }
+            initialize = not required_objects.issubset(existing_objects)
 
     if initialize:
         script = SETUP_PATH.read_text(encoding="utf-8")
@@ -53,6 +84,104 @@ def room_badge(percent: float) -> str:
 
 def h(value: object) -> str:
     return html.escape("" if value is None else str(value))
+
+
+def hash_password(password: str, salt: str | None = None) -> str:
+    """Return a salted PBKDF2 hash suitable for this standard-library demo."""
+    salt = salt or secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt.encode("utf-8"),
+        PBKDF2_ITERATIONS,
+    ).hex()
+    return f"{PASSWORD_ALGORITHM}${PBKDF2_ITERATIONS}${salt}${digest}"
+
+
+def verify_password(password: str, stored_hash: str) -> bool:
+    """Verify new PBKDF2 hashes and keep old SHA-256 demo hashes usable."""
+    if stored_hash.startswith(f"{PASSWORD_ALGORITHM}$"):
+        try:
+            algorithm, iterations, salt, digest = stored_hash.split("$", 3)
+            if algorithm != PASSWORD_ALGORITHM:
+                return False
+            candidate = hashlib.pbkdf2_hmac(
+                "sha256",
+                password.encode("utf-8"),
+                salt.encode("utf-8"),
+                int(iterations),
+            ).hex()
+            return hmac.compare_digest(candidate, digest)
+        except (ValueError, TypeError):
+            return False
+
+    # Backward compatibility for databases created before the security pass.
+    legacy_hash = hashlib.sha256(password.encode("utf-8")).hexdigest()
+    return hmac.compare_digest(legacy_hash, stored_hash)
+
+
+def is_valid_email(email: str) -> bool:
+    return bool(EMAIL_RE.match(email))
+
+
+def parse_datetime_local(value: str) -> str:
+    parsed = datetime.fromisoformat(value)
+    return parsed.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def safe_int(value: str, default: int | None = None) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def now_ts() -> float:
+    return time.time()
+
+
+def create_session(user_id: int) -> str:
+    session_id = secrets.token_urlsafe(32)
+    SESSIONS[session_id] = {
+        "user_id": user_id,
+        "expires_at": now_ts() + SESSION_TTL_SECONDS,
+    }
+    return session_id
+
+
+def get_session_user_id(handler: BaseHTTPRequestHandler) -> int | None:
+    cookie_header = handler.headers.get("Cookie")
+    if not cookie_header:
+        return None
+
+    jar = cookies.SimpleCookie()
+    jar.load(cookie_header)
+    session_cookie = jar.get(SESSION_COOKIE)
+    if session_cookie is None:
+        return None
+
+    session = SESSIONS.get(session_cookie.value)
+    if session is None:
+        return None
+
+    expires_at = float(session.get("expires_at", 0))
+    if expires_at < now_ts():
+        SESSIONS.pop(session_cookie.value, None)
+        return None
+
+    # Sliding expiration keeps active demo users signed in while still expiring stale sessions.
+    session["expires_at"] = now_ts() + SESSION_TTL_SECONDS
+    return int(session["user_id"])
+
+
+def build_session_cookie(session_id: str) -> cookies.SimpleCookie:
+    cookie = cookies.SimpleCookie()
+    cookie[SESSION_COOKIE] = session_id
+    cookie[SESSION_COOKIE]["path"] = "/"
+    cookie[SESSION_COOKIE]["httponly"] = True
+    cookie[SESSION_COOKIE]["samesite"] = "Lax"
+    cookie[SESSION_COOKIE]["max-age"] = str(SESSION_TTL_SECONDS)
+    return cookie
 
 
 def password_policy_error(password: str) -> str | None:
@@ -174,6 +303,22 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "passwords_do_not_match": "Passwords do not match",
         "account_created": "Account created successfully. Please sign in.",
         "email_exists": "Email already exists",
+        "demo_credentials_title": "Demo credentials",
+        "demo_credentials_text": "Use any seeded email below with password Demo123!",
+        "demo_student": "Student",
+        "demo_academic": "Academic",
+        "status": "Status",
+        "percent_full": "{percent}% full",
+        "no_schedule_assigned": "No schedule assigned to this academic yet.",
+        "no_exam_records": "No exam records are available.",
+        "occupancy_trend": "Occupancy trend",
+        "overlapping_requests": "Overlapping requests",
+        "conflict": "Conflict",
+        "overlaps_with": "overlaps with",
+        "room_utilization_snapshot": "Room Utilization Snapshot",
+        "average_occupancy": "Average occupancy",
+        "observations": "observations",
+        "last_seen": "Last seen",
         "yes": "Yes",
         "no": "No",
     },
@@ -279,6 +424,22 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "passwords_do_not_match": "Parolalar eşleşmiyor",
         "account_created": "Hesap başarıyla oluşturuldu. Lütfen giriş yapın.",
         "email_exists": "E-posta zaten mevcut",
+        "demo_credentials_title": "Demo giriş bilgileri",
+        "demo_credentials_text": "Aşağıdaki örnek e-postalardan birini Demo123! parolasıyla kullanın",
+        "demo_student": "Öğrenci",
+        "demo_academic": "Akademisyen",
+        "status": "Durum",
+        "percent_full": "%{percent} dolu",
+        "no_schedule_assigned": "Bu akademisyene henüz program atanmamış.",
+        "no_exam_records": "Sınav kaydı bulunmuyor.",
+        "occupancy_trend": "Doluluk eğilimi",
+        "overlapping_requests": "Çakışan talepler",
+        "conflict": "Çakışma",
+        "overlaps_with": "ile çakışıyor",
+        "room_utilization_snapshot": "Oda Kullanım Özeti",
+        "average_occupancy": "Ortalama doluluk",
+        "observations": "gözlem",
+        "last_seen": "Son görülme",
         "yes": "Evet",
         "no": "Hayır",
     },
@@ -312,6 +473,8 @@ def build_language_cookie(lang: str) -> cookies.SimpleCookie:
     cookie = cookies.SimpleCookie()
     cookie[LANG_COOKIE] = lang
     cookie[LANG_COOKIE]["path"] = "/"
+    cookie[LANG_COOKIE]["samesite"] = "Lax"
+    cookie[LANG_COOKIE]["max-age"] = str(30 * 24 * 60 * 60)
     return cookie
 
 
@@ -736,18 +899,8 @@ def parse_post_data(handler: BaseHTTPRequestHandler) -> dict[str, str]:
 
 
 def get_current_user(handler: BaseHTTPRequestHandler) -> sqlite3.Row | None:
-    cookie_header = handler.headers.get("Cookie")
-    if not cookie_header:
-        return None
-
-    jar = cookies.SimpleCookie()
-    jar.load(cookie_header)
-    session_cookie = jar.get(SESSION_COOKIE)
-    if session_cookie is None:
-        return None
-
-    user_id = SESSIONS.get(session_cookie.value)
-    if not user_id:
+    user_id = get_session_user_id(handler)
+    if user_id is None:
         return None
 
     with get_connection() as conn:
@@ -768,6 +921,20 @@ def signin_page(message: str = "", error: bool = False, lang: str = DEFAULT_LANG
         flash_class = "error" if error else "success"
         flash = f'<div class="flash {flash_class}">{h(message)}</div>'
 
+    utilization_rows = "".join(
+        f"""
+        <div class="stat-box">
+          <div class="stat-row">
+            <strong>{h(row["room_code"])}</strong>
+            <span class="badge info">{h(translate_status(row["latest_status"] or "Unknown", lang))}</span>
+          </div>
+          <div class="small muted">{h(t('average_occupancy', lang))}: {h(row["average_occupancy_rate"])}% • {h(row["observation_count"])} {h(t('observations', lang))}</div>
+          <div class="small muted">{h(t('last_seen', lang))}: {h(row["last_observed_at"] or '-')}</div>
+        </div>
+        """
+        for row in utilization
+    )
+
     content = f"""
     <section class="hero">
       <div class="hero-grid">
@@ -780,6 +947,14 @@ def signin_page(message: str = "", error: bool = False, lang: str = DEFAULT_LANG
           {flash}
           <div class="spaced">
             <p class="small muted">{h(t('no_account', lang))} <a href="/signup">{h(t('sign_up_as_student', lang))}</a></p>
+          </div>
+          <div class="card spaced">
+            <h3>{h(t('demo_credentials_title', lang))}</h3>
+            <p class="small muted">{h(t('demo_credentials_text', lang))}</p>
+            <div class="stats">
+              <div class="list-row"><strong>{h(t('demo_student', lang))}</strong><span class="small">can.yilmaz@std.yildiz.edu.tr</span></div>
+              <div class="list-row"><strong>{h(t('demo_academic', lang))}</strong><span class="small">ayse.demir@ytu.edu.tr</span></div>
+            </div>
           </div>
         </div>
         <div class="card">
@@ -811,6 +986,20 @@ def signup_page(message: str = "", error: bool = False, lang: str = DEFAULT_LANG
     dept_options = "".join(
         f'<option value="{row["department_id"]}">{h(row["department_name"])}</option>'
         for row in departments
+    )
+
+    utilization_rows = "".join(
+        f"""
+        <div class="stat-box">
+          <div class="stat-row">
+            <strong>{h(row["room_code"])}</strong>
+            <span class="badge info">{h(translate_status(row["latest_status"] or "Unknown", lang))}</span>
+          </div>
+          <div class="small muted">{h(t('average_occupancy', lang))}: {h(row["average_occupancy_rate"])}% • {h(row["observation_count"])} {h(t('observations', lang))}</div>
+          <div class="small muted">{h(t('last_seen', lang))}: {h(row["last_observed_at"] or '-')}</div>
+        </div>
+        """
+        for row in utilization
     )
 
     content = f"""
@@ -856,6 +1045,9 @@ def student_dashboard(user: sqlite3.Row, params: dict[str, list[str]], message: 
     projector = sql_bool(params.get("projector", [""])[0])
     smart_board = sql_bool(params.get("smart_board", [""])[0])
     min_outlets = params.get("min_outlets", [""])[0]
+    min_outlets_value = safe_int(min_outlets) if min_outlets else None
+    if min_outlets and min_outlets_value is None:
+        min_outlets = ""
     block = params.get("block", [""])[0]
 
     conditions = ["1=1"]
@@ -867,9 +1059,9 @@ def student_dashboard(user: sqlite3.Row, params: dict[str, list[str]], message: 
     if smart_board is not None:
         conditions.append("smart_board = ?")
         values.append(smart_board)
-    if min_outlets:
+    if min_outlets_value is not None:
         conditions.append("power_outlets >= ?")
-        values.append(int(min_outlets))
+        values.append(min_outlets_value)
     if block:
         conditions.append("block = ?")
         values.append(block)
@@ -921,7 +1113,7 @@ def student_dashboard(user: sqlite3.Row, params: dict[str, list[str]], message: 
             <div class="room-card {tag_class}">
               <div class="room-head">
                 <strong>{h(row["room_code"])}</strong>
-                <span>{percent}% full</span>
+                <span>{h(t('percent_full', lang).format(percent=percent))}</span>
               </div>
               <div class="small">{h(t('block_label', lang))} {h(row["block"])} • {h(t('floor', lang))} {h(row["floor"])} • {h(row["capacity"])} {h(t('seats', lang))}</div>
               <div class="room-tags">
@@ -959,6 +1151,20 @@ def student_dashboard(user: sqlite3.Row, params: dict[str, list[str]], message: 
     block_options = "".join(
         f'<option value="{h(row["block"])}" {"selected" if row["block"] == block else ""}>{h(row["block"])}</option>'
         for row in blocks
+    )
+
+    utilization_rows = "".join(
+        f"""
+        <div class="stat-box">
+          <div class="stat-row">
+            <strong>{h(row["room_code"])}</strong>
+            <span class="badge info">{h(translate_status(row["latest_status"] or "Unknown", lang))}</span>
+          </div>
+          <div class="small muted">{h(t('average_occupancy', lang))}: {h(row["average_occupancy_rate"])}% • {h(row["observation_count"])} {h(t('observations', lang))}</div>
+          <div class="small muted">{h(t('last_seen', lang))}: {h(row["last_observed_at"] or '-')}</div>
+        </div>
+        """
+        for row in utilization
     )
 
     content = f"""
@@ -1070,12 +1276,10 @@ def student_dashboard(user: sqlite3.Row, params: dict[str, list[str]], message: 
             </select>
           </label>
           <label>{h(t('start', lang))}
-            <input type="datetime-local" name="requested_start" required>
-            <div class="muted small">{h(t('date_format', lang))}</div>
+            <input type="datetime-local" name="requested_start" required placeholder="{h(t('date_format', lang))}">
           </label>
           <label>{h(t('end', lang))}
-            <input type="datetime-local" name="requested_end" required>
-            <div class="muted small">{h(t('date_format', lang))}</div>
+            <input type="datetime-local" name="requested_end" required placeholder="{h(t('date_format', lang))}">
           </label>
           <label>{h(t('request_note_hint', lang))}
             <textarea name="request_note" placeholder="{h(t('request_note_hint', lang))}"></textarea>
@@ -1147,6 +1351,14 @@ def academic_dashboard(user: sqlite3.Row, message: str = "", error: bool = False
             ORDER BY datetime(er.requested_start)
             """
         ).fetchall()
+        utilization = conn.execute(
+            """
+            SELECT room_code, average_occupancy_rate, observation_count, latest_status, last_observed_at
+            FROM v_room_utilization_summary
+            ORDER BY average_occupancy_rate DESC, room_code
+            LIMIT 6
+            """
+        ).fetchall()
 
     flash = ""
     if message:
@@ -1164,7 +1376,7 @@ def academic_dashboard(user: sqlite3.Row, message: str = "", error: bool = False
         </div>
         """
         for row in my_schedule
-    ) or '<div class="list-row muted">No schedule assigned to this academic yet.</div>'
+    ) or f'<div class="list-row muted">{h(t("no_schedule_assigned", lang))}</div>'
 
     coordination_rows = "".join(
         f"""
@@ -1173,11 +1385,11 @@ def academic_dashboard(user: sqlite3.Row, message: str = "", error: bool = False
             <strong>{h(row["title"])}</strong>
             <span class="badge {'ok' if row['overlapping_event_requests'] == 0 else 'warn'}">{h(row["room_code"])}</span>
           </div>
-          <div class="small muted">Occupancy trend: {h(row["prior_week_occupancy_rate"])}% • Overlapping requests: {h(row["overlapping_event_requests"])}</div>
+          <div class="small muted">{h(t('occupancy_trend', lang))}: {h(row["prior_week_occupancy_rate"])}% • {h(t('overlapping_requests', lang))}: {h(row["overlapping_event_requests"])}</div>
         </div>
         """
         for row in coordination
-    ) or '<div class="list-row muted">No exam records are available.</div>'
+    ) or f'<div class="list-row muted">{h(t("no_exam_records", lang))}</div>'
 
     pending_rows = []
     for row in pending:
@@ -1194,12 +1406,12 @@ def academic_dashboard(user: sqlite3.Row, message: str = "", error: bool = False
                   <form method="post" action="/requests/review" class="inline-form">
                     <input type="hidden" name="request_id" value="{h(row["request_id"])}">
                     <input type="hidden" name="decision" value="Approved">
-                    <button type="submit">Approve</button>
+                    <button type="submit">{h(t('approve', lang))}</button>
                   </form>
                   <form method="post" action="/requests/review" class="inline-form">
                     <input type="hidden" name="request_id" value="{h(row["request_id"])}">
                     <input type="hidden" name="decision" value="Rejected">
-                    <button class="button-secondary" type="submit">Reject</button>
+                    <button class="button-secondary" type="submit">{h(t('reject', lang))}</button>
                   </form>
                 </div>
               </td>
@@ -1212,13 +1424,27 @@ def academic_dashboard(user: sqlite3.Row, message: str = "", error: bool = False
         <div class="list-row">
           <div>
             <strong>{h(row["event_title"])}</strong>
-            <div class="small muted">{h(row["room_code"])} overlaps with {h(row["schedule_title"])}</div>
+            <div class="small muted">{h(row["room_code"])} {h(t('overlaps_with', lang))} {h(row["schedule_title"])}</div>
           </div>
-          <span class="badge danger">Conflict</span>
+          <span class="badge danger">{h(t('conflict', lang))}</span>
         </div>
         """
         for row in conflict_rows
-    ) or '<div class="list-row"><div><strong>Current state</strong><div class="small muted">No active conflict is detected in pending or approved requests.</div></div><span class="badge ok">Clear</span></div>'
+    ) or f'<div class="list-row"><div><strong>{h(t("current_state", lang))}</strong><div class="small muted">{h(t("no_active_conflict", lang))}</div></div><span class="badge ok">{h(t("clear", lang))}</span></div>'
+
+    utilization_rows = "".join(
+        f"""
+        <div class="stat-box">
+          <div class="stat-row">
+            <strong>{h(row["room_code"])}</strong>
+            <span class="badge info">{h(translate_status(row["latest_status"] or "Unknown", lang))}</span>
+          </div>
+          <div class="small muted">{h(t('average_occupancy', lang))}: {h(row["average_occupancy_rate"])}% • {h(row["observation_count"])} {h(t('observations', lang))}</div>
+          <div class="small muted">{h(t('last_seen', lang))}: {h(row["last_observed_at"] or '-')}</div>
+        </div>
+        """
+        for row in utilization
+    )
 
     content = f"""
     <section class="hero">
@@ -1262,6 +1488,11 @@ def academic_dashboard(user: sqlite3.Row, message: str = "", error: bool = False
         <h3>{h(t('exam_coordination', lang))}</h3>
         <div class="stats">{coordination_rows}</div>
       </article>
+    </section>
+
+    <section class="card spaced">
+      <h3>{h(t('room_utilization_snapshot', lang))}</h3>
+      <div class="grid-3">{utilization_rows}</div>
     </section>
 
     <section class="grid-2 spaced">
@@ -1364,36 +1595,33 @@ class KMFHandler(BaseHTTPRequestHandler):
         lang_cookie = build_language_cookie(lang)
 
       if parsed.path == "/login":
-        email = form.get("email", "").strip()
-        password = form.get("password", "").strip()
+        email = form.get("email", "").strip().lower()
+        password = form.get("password", "")
         if not email or not password:
           self.redirect("/signin?message=Email+and+password+are+required&error=1", cookies_header=lang_cookie)
           return
 
-        password_hash = hashlib.sha256(password.encode()).hexdigest()
         with get_connection() as conn:
           db_user = conn.execute(
             """
-            SELECT user_id, name, email, role
+            SELECT user_id, name, email, role, password_hash
             FROM Users
-            WHERE email = ? AND password_hash = ?
+            WHERE email = ?
             """,
-            (email, password_hash),
+            (email,),
           ).fetchone()
 
-        if db_user is None:
+        if db_user is None or not verify_password(password, db_user["password_hash"]):
           self.redirect("/signin?message=Invalid+email+or+password&error=1", cookies_header=lang_cookie)
           return
 
-        session_id = secrets.token_hex(16)
-        SESSIONS[session_id] = db_user["user_id"]
-        cookie = cookies.SimpleCookie()
-        cookie[SESSION_COOKIE] = session_id
-        cookie[SESSION_COOKIE]["path"] = "/"
+        session_id = create_session(db_user["user_id"])
+        cookie = build_session_cookie(session_id)
 
         self.send_response(303)
         self.send_header("Location", "/dashboard")
-        self.send_header("Set-Cookie", cookie.output(header="").strip())
+        for morsel in cookie.values():
+          self.send_header("Set-Cookie", morsel.OutputString())
         if lang_cookie is not None:
           for morsel in lang_cookie.values():
             self.send_header("Set-Cookie", morsel.OutputString())
@@ -1417,22 +1645,33 @@ class KMFHandler(BaseHTTPRequestHandler):
         if policy_error is not None:
           self.redirect(f"/signup?message={quote_plus(policy_error)}&error=1", cookies_header=lang_cookie)
           return
-        if "@" not in email:
+        email = email.lower()
+        if not is_valid_email(email):
           self.redirect("/signup?message=Invalid+email+address&error=1", cookies_header=lang_cookie)
           return
 
-        password_hash = hashlib.sha256(password.encode()).hexdigest()
+        password_hash = hash_password(password)
         try:
+          department_int = int(department_id)
           with get_connection() as conn:
+            department_exists = conn.execute(
+              "SELECT 1 FROM Departments WHERE department_id = ? AND is_active = 1",
+              (department_int,),
+            ).fetchone()
+            if department_exists is None:
+              self.redirect("/signup?message=Invalid+department&error=1", cookies_header=lang_cookie)
+              return
             conn.execute(
               """
               INSERT INTO Users (department_id, name, email, password_hash, role)
               VALUES (?, ?, ?, ?, 'Student')
               """,
-              (int(department_id), name, email, password_hash),
+              (department_int, name, email, password_hash),
             )
             conn.commit()
           self.redirect("/signin?message=Account+created+successfully.+Please+sign+in.", cookies_header=lang_cookie)
+        except ValueError:
+          self.redirect("/signup?message=Invalid+department&error=1", cookies_header=lang_cookie)
         except sqlite3.IntegrityError:
           self.redirect("/signup?message=Email+already+exists&error=1", cookies_header=lang_cookie)
         return
@@ -1447,7 +1686,25 @@ class KMFHandler(BaseHTTPRequestHandler):
           return
 
         try:
+          room_id = int(form.get("room_id", ""))
+          event_title = form.get("event_title", "").strip()
+          event_type = form.get("event_type", "").strip()
+          requested_start = parse_datetime_local(form.get("requested_start", ""))
+          requested_end = parse_datetime_local(form.get("requested_end", ""))
+          if not event_title or len(event_title) > 120:
+            raise ValueError("Event title must be between 1 and 120 characters")
+          if event_type not in ALLOWED_EVENT_TYPES:
+            raise ValueError("Unsupported event type")
+          if datetime.fromisoformat(requested_end) <= datetime.fromisoformat(requested_start):
+            raise ValueError("End time must be after start time")
+
           with get_connection() as conn:
+            active_room = conn.execute(
+              "SELECT 1 FROM Classrooms WHERE room_id = ? AND is_active = 1",
+              (room_id,),
+            ).fetchone()
+            if active_room is None:
+              raise ValueError("Selected room is not active")
             conn.execute(
               """
               INSERT INTO Event_Requests (
@@ -1457,12 +1714,12 @@ class KMFHandler(BaseHTTPRequestHandler):
               """,
               (
                 user["user_id"],
-                int(form["room_id"]),
-                form["event_title"],
-                form["event_type"],
-                form["requested_start"].replace("T", " ") + ":00",
-                form["requested_end"].replace("T", " ") + ":00",
-                form.get("request_note", "").strip() or None,
+                room_id,
+                event_title,
+                event_type,
+                requested_start,
+                requested_end,
+                form.get("request_note", "").strip()[:500] or None,
               ),
             )
             conn.commit()
@@ -1483,8 +1740,9 @@ class KMFHandler(BaseHTTPRequestHandler):
 
         try:
           with get_connection() as conn:
+            request_id = int(form.get("request_id", ""))
             if decision == "Approved":
-              conn.execute(
+              cursor = conn.execute(
                 """
                 UPDATE Event_Requests
                 SET status = 'Approved',
@@ -1493,10 +1751,10 @@ class KMFHandler(BaseHTTPRequestHandler):
                   rejection_reason = NULL
                 WHERE request_id = ? AND status = 'Pending'
                 """,
-                (user["user_id"], int(form["request_id"])),
+                (user["user_id"], request_id),
               )
             else:
-              conn.execute(
+              cursor = conn.execute(
                 """
                 UPDATE Event_Requests
                 SET status = 'Rejected',
@@ -1505,8 +1763,10 @@ class KMFHandler(BaseHTTPRequestHandler):
                   rejection_reason = 'Rejected from academic dashboard'
                 WHERE request_id = ? AND status = 'Pending'
                 """,
-                (user["user_id"], int(form["request_id"])),
+                (user["user_id"], request_id),
               )
+            if cursor.rowcount == 0:
+              raise ValueError("Request is not pending or does not exist")
             conn.commit()
           self.redirect(f"/dashboard?message=Request+{decision.lower()}+successfully", cookies_header=lang_cookie)
         except (sqlite3.IntegrityError, sqlite3.OperationalError, KeyError, ValueError) as exc:
@@ -1546,6 +1806,8 @@ class KMFHandler(BaseHTTPRequestHandler):
         cookie = cookies.SimpleCookie()
         cookie[SESSION_COOKIE] = ""
         cookie[SESSION_COOKIE]["path"] = "/"
+        cookie[SESSION_COOKIE]["httponly"] = True
+        cookie[SESSION_COOKIE]["samesite"] = "Lax"
         cookie[SESSION_COOKIE]["expires"] = "Thu, 01 Jan 1970 00:00:00 GMT"
         self.send_response(303)
         self.send_header("Location", "/")
