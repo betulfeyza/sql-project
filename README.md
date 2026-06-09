@@ -1,5 +1,7 @@
 # KMF Smart Classroom & Event Management System
 
+Video link: https://stdyildizedu-my.sharepoint.com/:v:/g/personal/suzal_demirciler_std_yildiz_edu_tr/IQDc5TPbibTeRoX4uItUx83XARKhDjjNCf1k--agzWnsKeo?e=qzPFk0
+
 This repository contains an Applied SQL course project prepared for the Mathematical Engineering Department at Yildiz Technical University. The project models a smart classroom and event coordination platform for the Chemical and Metallurgical Engineering Faculty (KMF).
 
 The system demonstrates how database design, SQL integrity rules, analytical queries, authentication, conflict detection, and a role-based web interface can work together in one academic assignment.
